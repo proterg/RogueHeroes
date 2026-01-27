@@ -5,3 +5,4 @@
  */
 
 export * from './combat';
+export * from './mapEditor';

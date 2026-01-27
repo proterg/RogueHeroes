@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:editor": "vite --mode editor",
+    "dev:overworld": "vite --mode overworld",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest",

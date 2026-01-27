@@ -8,95 +8,90 @@ Phaser handles all game rendering - the overworld map, combat battlefield, and a
 
 ```
 game/
-├── Game.ts          # Phaser configuration
-├── scenes/          # Game scenes
-│   ├── BootScene.ts
-│   ├── OverworldScene.ts
-│   └── CombatScene.ts
-├── entities/        # Game objects
-│   ├── Unit.ts
-│   └── Hero.ts
-└── utils/           # Helper functions
+├── Game.ts              # Phaser configuration
+├── scenes/              # Game scenes
+│   ├── BootScene.ts     # Asset loading
+│   ├── OverworldScene.ts # Exploration map
+│   └── CombatScene.ts   # Tactical combat
+├── entities/            # Game objects
+│   ├── index.ts         # Exports
+│   ├── Hero.ts          # Overworld hero
+│   └── Unit.ts          # Combat unit (TODO)
+├── systems/             # Reusable game systems
+│   ├── index.ts         # Exports
+│   ├── FogOfWar.ts      # Visibility system
+│   └── Minimap.ts       # Minimap renderer
+└── utils/               # Helper functions
+    ├── index.ts         # Exports
+    └── Pathfinding.ts   # A* algorithm
 ```
+
+## Architecture Principles
+
+### 1. Scenes Orchestrate, Systems Do Work
+Scenes (like `OverworldScene`) should be thin orchestration layers that:
+- Create and wire up systems
+- Handle input routing
+- Manage scene lifecycle
+
+Heavy logic goes in systems and utilities:
+- `FogOfWar` - handles all visibility calculations and rendering
+- `Minimap` - handles external canvas rendering
+- `Pathfinding` - handles A* algorithm
+- `Hero` - handles sprite, animation, and movement
+
+### 2. Systems Are Reusable
+Systems should be independent and reusable across scenes:
+```typescript
+// Can be used in any scene
+const fog = new FogOfWar(scene, mapWidth, mapHeight, tileSize);
+fog.addVisionSource('hero', x, y, radius);
+fog.update();
+```
+
+### 3. Types Live in src/types/
+All TypeScript types are centralized:
+- `combat.ts` - Combat-related types
+- `mapEditor.ts` - Map data structures, walkability
+- `tiles.ts` - Named tile constants
 
 ## Creating a New Scene
 
 ### Step 1: Create the Scene File
 
 ```typescript
-// src/game/scenes/CombatScene.ts
+// src/game/scenes/MyScene.ts
 /**
- * CombatScene
- * -----------
- * Tactical combat scene. Renders battlefield grid,
- * units, and combat animations.
+ * MyScene
+ * -------
+ * Brief description of what this scene does.
  *
  * Events emitted:
- * - 'unit-selected': Unit clicked
- * - 'tile-clicked': Empty tile clicked
- * - 'combat-ended': Combat finished
+ * - 'event-name': Description
  */
 
 import Phaser from 'phaser';
-import { Unit } from '../entities/Unit';
-import { CombatState } from '../../types/combat';
 
-export class CombatScene extends Phaser.Scene {
-  private units: Map<string, Unit> = new Map();
-  private selectedUnit: Unit | null = null;
-
+export class MyScene extends Phaser.Scene {
   constructor() {
-    super({ key: 'CombatScene' });
+    super({ key: 'MyScene' });
   }
 
-  init(data: { combatState: CombatState }) {
-    // Initialize with combat state from API
-    this.createUnits(data.combatState);
+  preload(): void {
+    // Load assets
   }
 
-  preload() {
-    this.load.image('unit-warrior', 'assets/units/warrior.png');
-    this.load.image('unit-archer', 'assets/units/archer.png');
-    this.load.image('tile', 'assets/tiles/grass.png');
-  }
-
-  create() {
-    this.createBattlefield();
+  create(): void {
+    // Create game objects
     this.setupInput();
   }
 
-  update(time: number, delta: number) {
-    // Update unit animations, projectiles, etc.
-    this.units.forEach((unit) => unit.update(delta));
+  update(): void {
+    // Game loop
   }
 
-  // Public methods called from React
-  public updateState(state: CombatState) {
-    // Sync visual state with server state
-  }
-
-  public selectUnit(unitId: string) {
-    const unit = this.units.get(unitId);
-    if (unit) {
-      this.selectedUnit = unit;
-      this.events.emit('unit-selected', unit.getData());
-    }
-  }
-
-  private createBattlefield() {
-    // Create grid tiles
-  }
-
-  private createUnits(state: CombatState) {
-    // Create unit sprites from state
-  }
-
-  private setupInput() {
-    this.input.on('pointerdown', this.handleClick, this);
-  }
-
-  private handleClick(pointer: Phaser.Input.Pointer) {
-    // Handle tile/unit clicks
+  private setupInput(): void {
+    // Input handlers
   }
 }
 ```
@@ -105,92 +100,147 @@ export class CombatScene extends Phaser.Scene {
 
 ```typescript
 // src/game/Game.ts
-import { CombatScene } from './scenes/CombatScene';
+import { MyScene } from './scenes/MyScene';
 
 export const gameConfig: Phaser.Types.Core.GameConfig = {
-  type: Phaser.AUTO,
-  parent: 'game-container',
-  width: 1280,
-  height: 720,
-  scene: [BootScene, OverworldScene, CombatScene],
   // ...
+  scene: [BootScene, OverworldScene, CombatScene, MyScene],
 };
 ```
 
-## Creating Game Entities
+## Creating a New System
 
-### Step 1: Create the Entity Class
+Systems encapsulate reusable game logic:
 
 ```typescript
-// src/game/entities/Unit.ts
+// src/game/systems/MySystem.ts
 /**
- * Unit Entity
- * -----------
- * Represents a combat unit on the battlefield.
- * Handles rendering, animation, and movement.
+ * MySystem
+ * --------
+ * Description of what this system does.
+ *
+ * Usage:
+ *   const system = new MySystem(scene, config);
+ *   system.update();
  */
 
 import Phaser from 'phaser';
-import { UnitData } from '../../types/combat';
 
-export class Unit extends Phaser.GameObjects.Container {
-  private sprite: Phaser.GameObjects.Sprite;
-  private healthBar: Phaser.GameObjects.Graphics;
-  private data: UnitData;
+export interface MySystemConfig {
+  // Configuration options
+}
 
-  constructor(scene: Phaser.Scene, data: UnitData) {
-    super(scene, data.x * 64, data.y * 64);
+export class MySystem {
+  private scene: Phaser.Scene;
 
-    this.data = data;
-    this.sprite = scene.add.sprite(0, 0, `unit-${data.type}`);
-    this.healthBar = scene.add.graphics();
-
-    this.add([this.sprite, this.healthBar]);
-    this.updateHealthBar();
-
-    scene.add.existing(this);
+  constructor(scene: Phaser.Scene, config: MySystemConfig) {
+    this.scene = scene;
+    // Initialize
   }
 
-  update(delta: number) {
-    // Update animations
+  update(): void {
+    // Per-frame updates
   }
 
-  moveTo(x: number, y: number) {
-    this.scene.tweens.add({
-      targets: this,
-      x: x * 64,
-      y: y * 64,
-      duration: 300,
-      ease: 'Power2',
-    });
-  }
-
-  takeDamage(amount: number) {
-    this.data.hp -= amount;
-    this.updateHealthBar();
-
-    // Flash red
-    this.sprite.setTint(0xff0000);
-    this.scene.time.delayedCall(100, () => {
-      this.sprite.clearTint();
-    });
-  }
-
-  getData(): UnitData {
-    return { ...this.data };
-  }
-
-  private updateHealthBar() {
-    this.healthBar.clear();
-    const pct = this.data.hp / this.data.maxHp;
-
-    this.healthBar.fillStyle(0x000000);
-    this.healthBar.fillRect(-20, -30, 40, 6);
-
-    this.healthBar.fillStyle(pct > 0.3 ? 0x00ff00 : 0xff0000);
-    this.healthBar.fillRect(-20, -30, 40 * pct, 6);
+  destroy(): void {
+    // Cleanup
   }
 }
+```
+
+Don't forget to export from `systems/index.ts`:
+```typescript
+export { MySystem } from './MySystem';
+export type { MySystemConfig } from './MySystem';
+```
+
+## Creating a New Entity
+
+Entities represent in-world objects (hero, units, items):
+
+```typescript
+// src/game/entities/MyEntity.ts
+/**
+ * MyEntity
+ * --------
+ * Description.
+ */
+
+import Phaser from 'phaser';
+
+export class MyEntity {
+  private scene: Phaser.Scene;
+  private sprite: Phaser.GameObjects.Sprite;
+
+  constructor(scene: Phaser.Scene, x: number, y: number) {
+    this.scene = scene;
+    this.sprite = scene.add.sprite(x, y, 'texture-key');
+  }
+
+  // Static preload method for assets
+  static preload(scene: Phaser.Scene): void {
+    scene.load.image('texture-key', 'assets/path/to/image.png');
+  }
+
+  update(delta: number): void {
+    // Per-frame updates
+  }
+
+  destroy(): void {
+    this.sprite.destroy();
+  }
+}
+```
+
+## Using Pathfinding
+
+The `Pathfinding` utility provides A* with 8-directional movement:
+
+```typescript
+import { findPath, getDirectionFromDelta } from '../utils/Pathfinding';
+
+// Find path from (0,0) to (5,5)
+const path = findPath(
+  0, 0,           // Start
+  5, 5,           // End
+  (x, y) => map.isWalkable(x, y),  // Walkability check
+  mapWidth,
+  mapHeight
+);
+
+// Path is array of {x, y} from start to end (excluding start)
+for (const step of path) {
+  console.log(`Move to (${step.x}, ${step.y})`);
+}
+
+// Get direction name for animations
+const direction = getDirectionFromDelta(dx, dy);
+// Returns: 'north', 'north_east', 'east', etc.
+```
+
+## Using Fog of War
+
+The `FogOfWar` system handles visibility with smooth circular gradients:
+
+```typescript
+import { FogOfWar } from '../systems/FogOfWar';
+
+// Create fog system
+const fog = new FogOfWar(scene, mapWidth, mapHeight, tileSize);
+
+// Add vision sources
+fog.addVisionSource('hero', heroX, heroY, 4);  // 4-tile radius
+fog.addVisionSource('tower', towerX, towerY, 6);
+
+// Update when sources move
+fog.updateVisionSource('hero', newX, newY);
+
+// Render fog (call in update loop)
+fog.update();
+
+// Check visibility
+if (fog.isTileVisible(x, y)) { /* ... */ }
+if (fog.isTileExplored(x, y)) { /* ... */ }
 ```
 
 ## React-Phaser Communication
@@ -200,7 +250,6 @@ export class Unit extends Phaser.GameObjects.Container {
 ```typescript
 // In Phaser scene
 this.events.emit('unit-selected', unitData);
-this.events.emit('combat-ended', { winner: 'player' });
 
 // In React component
 useEffect(() => {
@@ -213,25 +262,24 @@ useEffect(() => {
 ### From React to Phaser (Methods)
 
 ```typescript
-// In React component
-const handleSpellCast = (spell: Spell) => {
+// In React
+const handleAction = () => {
   const scene = gameRef.current?.scene.getScene('CombatScene') as CombatScene;
-  scene?.castSpell(spell, targetPosition);
+  scene?.doSomething();
 };
 
-// In Phaser scene
-public castSpell(spell: Spell, target: Position) {
-  // Play spell animation
-  // Apply effects
+// In Phaser scene - public method
+public doSomething(): void {
+  // Handle React request
 }
 ```
 
 ## Asset Loading
 
-Load assets in preload():
+Load assets in `preload()`:
 
 ```typescript
-preload() {
+preload(): void {
   // Images
   this.load.image('key', 'assets/path/to/image.png');
 
@@ -241,35 +289,38 @@ preload() {
     frameHeight: 64,
   });
 
-  // Tilemaps
-  this.load.tilemapTiledJSON('map', 'assets/maps/overworld.json');
+  // JSON data
+  this.load.json('map', 'assets/maps/level1.json');
 
-  // Audio
-  this.load.audio('attack', 'assets/sounds/attack.wav');
+  // Entity assets (static preload)
+  Hero.preload(this);
 }
 ```
 
-## Testing Scenes
+## Tile Configuration
+
+Tile IDs are defined in `src/types/tiles.ts` with named constants:
 
 ```typescript
-// tests/game/CombatScene.test.ts
-import { CombatScene } from '../../src/game/scenes/CombatScene';
+import { TERRAIN_WATER, DECOR_BRIDGE } from '../../types/tiles';
 
-describe('CombatScene', () => {
-  let scene: CombatScene;
+// Check if tile is water
+if (TERRAIN_WATER.ALL.includes(tileId)) {
+  // Handle water tile
+}
 
-  beforeEach(() => {
-    // Create mock Phaser game
-    const game = new Phaser.Game({
-      type: Phaser.HEADLESS,
-      scene: [CombatScene],
-    });
-    scene = game.scene.getScene('CombatScene') as CombatScene;
-  });
+// Check if decoration is a bridge
+if (DECOR_BRIDGE.TILES.includes(decorationId)) {
+  // Bridge overrides water blocking
+}
+```
 
-  it('creates units from state', () => {
-    scene.scene.start('CombatScene', { combatState: mockState });
-    expect(scene.getUnitCount()).toBe(mockState.units.length);
-  });
-});
+Walkability is checked via `src/types/mapEditor.ts`:
+
+```typescript
+import { isTileWalkable } from '../../types/mapEditor';
+
+if (isTileWalkable(terrainId, decorationId)) {
+  // Tile is walkable
+}
 ```

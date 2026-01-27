@@ -32,10 +32,29 @@ import {
   ORC,
   SOLDIER,
   VAMPIRE,
+  ARCHER,
+  AXEMAN,
+  KNIGHT,
+  LANCER,
   calculateDamage,
   formatStats,
   isInVision,
+  getSpriteConfig,
 } from '../data/UnitStats';
+import {
+  getOccupiedTiles,
+  isTileOccupied,
+  canUnitFitAt,
+  getUnitWorldX,
+  getUnitWorldY,
+  getUnitDistance,
+  GridUnit,
+} from '../utils/GridUtils';
+import {
+  preloadUnitSprites,
+  createUnitAnimations,
+  getAnimPrefix,
+} from '../systems/AnimationSystem';
 
 /** Unit behavior state machine */
 type UnitState = 'moving' | 'setting' | 'attacking';
@@ -52,6 +71,7 @@ interface Unit {
   state: UnitState;
   setCounter: number;  // Turns spent in 'setting' state (for attackDelay)
   target: Unit | null; // Locked attack target
+  chargeReady: boolean; // Lancer charge attack ready (1.2x damage, no delay)
 }
 
 export class CombatScene extends Phaser.Scene {
@@ -88,44 +108,11 @@ export class CombatScene extends Phaser.Scene {
     // Load tileset
     this.load.image('tileset', 'assets/tiles/Dungeon_Tileset.png');
 
-    // Load skeleton1 sprite sheets (32x32 frames)
-    this.load.spritesheet('skeleton1_idle', 'assets/units/enemies-skeleton1_idle.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('skeleton1_attack', 'assets/units/enemies-skeleton1_attack.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('skeleton1_death', 'assets/units/enemies-skeleton1_death.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('skeleton1_move', 'assets/units/enemies-skeleton1_movement.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('skeleton1_hurt', 'assets/units/enemies-skeleton1_take_damage.png', { frameWidth: 32, frameHeight: 32 });
+    // Load all unit sprite sheets via AnimationSystem
+    preloadUnitSprites(this);
 
-    // Load skeleton2 sprite sheets (32x32 frames)
-    this.load.spritesheet('skeleton2_idle', 'assets/units/enemies-skeleton2_idle.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('skeleton2_attack', 'assets/units/enemies-skeleton2_attack.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('skeleton2_death', 'assets/units/enemies-skeleton2_death.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('skeleton2_move', 'assets/units/enemies-skeleton2_movemen.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('skeleton2_hurt', 'assets/units/enemies-skeleton2_take_damage.png', { frameWidth: 32, frameHeight: 32 });
-
-    // Load orc sprite sheets (100x100 frames)
-    this.load.spritesheet('orc_idle', 'assets/units/orc_idle.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('orc_attack', 'assets/units/orc_attack.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('orc_attack_down', 'assets/units/orc_attack_down.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('orc_attack_up', 'assets/units/orc_attack_up.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('orc_death', 'assets/units/orc_death.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('orc_move', 'assets/units/orc_move.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('orc_hurt', 'assets/units/orc_hurt.png', { frameWidth: 100, frameHeight: 100 });
-
-    // Load soldier sprite sheets (100x100 frames)
-    this.load.spritesheet('soldier_idle', 'assets/units/soldier_idle.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('soldier_attack', 'assets/units/soldier_attack.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('soldier_attack_down', 'assets/units/soldier_attack_down.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('soldier_attack_up', 'assets/units/soldier_attack_up.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('soldier_death', 'assets/units/soldier_death.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('soldier_move', 'assets/units/soldier_move.png', { frameWidth: 100, frameHeight: 100 });
-    this.load.spritesheet('soldier_hurt', 'assets/units/soldier_hurt.png', { frameWidth: 100, frameHeight: 100 });
-
-    // Load vampire sprite sheets (32x32 frames)
-    this.load.spritesheet('vampire_idle', 'assets/units/vampire_idle.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('vampire_attack', 'assets/units/vampire_attack.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('vampire_death', 'assets/units/vampire_death.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('vampire_move', 'assets/units/vampire_move.png', { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet('vampire_hurt', 'assets/units/vampire_hurt.png', { frameWidth: 32, frameHeight: 32 });
+    // Load projectiles
+    this.load.image('arrow', 'assets/units/arrow.png');
   }
 
   create(): void {
@@ -144,8 +131,8 @@ export class CombatScene extends Phaser.Scene {
     this.fogGraphics = this.add.graphics();
     this.fogGraphics.setDepth(100);
 
-    // Create animations
-    this.createAnimations();
+    // Create animations via AnimationSystem
+    createUnitAnimations(this);
 
     // Spawn units
     this.spawnUnits();
@@ -295,197 +282,6 @@ export class CombatScene extends Phaser.Scene {
     return distance <= viewer.stats.vision + 1.5; // Include partial vision range
   }
 
-  private createAnimations(): void {
-    // Skeleton1 animations (32x32 frames)
-    // idle: 192/32 = 6, attack: 288/32 = 9, death: 544/32 = 17, move: 320/32 = 10, hurt: 160/32 = 5
-    this.anims.create({
-      key: 'skeleton1_idle_anim',
-      frames: this.anims.generateFrameNumbers('skeleton1_idle', { start: 0, end: 5 }),
-      frameRate: 6,
-      repeat: -1,
-    });
-    this.anims.create({
-      key: 'skeleton1_attack_anim',
-      frames: this.anims.generateFrameNumbers('skeleton1_attack', { start: 0, end: 8 }),
-      frameRate: 12,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'skeleton1_death_anim',
-      frames: this.anims.generateFrameNumbers('skeleton1_death', { start: 0, end: 16 }),
-      frameRate: 12,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'skeleton1_move_anim',
-      frames: this.anims.generateFrameNumbers('skeleton1_move', { start: 0, end: 9 }),
-      frameRate: 10,
-      repeat: -1,
-    });
-    this.anims.create({
-      key: 'skeleton1_hurt_anim',
-      frames: this.anims.generateFrameNumbers('skeleton1_hurt', { start: 0, end: 4 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-
-    // Skeleton2 animations (32x32 frames)
-    // idle: 192/32 = 6, attack: 480/32 = 15, death: 480/32 = 15, move: 320/32 = 10, hurt: 160/32 = 5
-    this.anims.create({
-      key: 'skeleton2_idle_anim',
-      frames: this.anims.generateFrameNumbers('skeleton2_idle', { start: 0, end: 5 }),
-      frameRate: 6,
-      repeat: -1,
-    });
-    this.anims.create({
-      key: 'skeleton2_attack_anim',
-      frames: this.anims.generateFrameNumbers('skeleton2_attack', { start: 0, end: 14 }),
-      frameRate: 12,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'skeleton2_death_anim',
-      frames: this.anims.generateFrameNumbers('skeleton2_death', { start: 0, end: 14 }),
-      frameRate: 12,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'skeleton2_move_anim',
-      frames: this.anims.generateFrameNumbers('skeleton2_move', { start: 0, end: 9 }),
-      frameRate: 10,
-      repeat: -1,
-    });
-    this.anims.create({
-      key: 'skeleton2_hurt_anim',
-      frames: this.anims.generateFrameNumbers('skeleton2_hurt', { start: 0, end: 4 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-
-    // Orc animations (100x100 frames)
-    // idle: 600/100 = 6, attack: 600/100 = 6, death: 400/100 = 4, move: 800/100 = 8, hurt: 400/100 = 4
-    this.anims.create({
-      key: 'orc_idle_anim',
-      frames: this.anims.generateFrameNumbers('orc_idle', { start: 0, end: 5 }),
-      frameRate: 6,
-      repeat: -1,
-    });
-    this.anims.create({
-      key: 'orc_attack_anim',
-      frames: this.anims.generateFrameNumbers('orc_attack', { start: 0, end: 5 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'orc_attack_down_anim',
-      frames: this.anims.generateFrameNumbers('orc_attack_down', { start: 0, end: 5 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'orc_attack_up_anim',
-      frames: this.anims.generateFrameNumbers('orc_attack_up', { start: 0, end: 5 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'orc_death_anim',
-      frames: this.anims.generateFrameNumbers('orc_death', { start: 0, end: 3 }),
-      frameRate: 8,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'orc_move_anim',
-      frames: this.anims.generateFrameNumbers('orc_move', { start: 0, end: 7 }),
-      frameRate: 10,
-      repeat: -1,
-    });
-    this.anims.create({
-      key: 'orc_hurt_anim',
-      frames: this.anims.generateFrameNumbers('orc_hurt', { start: 0, end: 3 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-
-    // Soldier animations (100x100 frames)
-    // idle: 600/100 = 6, attack: 600/100 = 6, death: 400/100 = 4, move: 800/100 = 8, hurt: 400/100 = 4
-    this.anims.create({
-      key: 'soldier_idle_anim',
-      frames: this.anims.generateFrameNumbers('soldier_idle', { start: 0, end: 5 }),
-      frameRate: 6,
-      repeat: -1,
-    });
-    this.anims.create({
-      key: 'soldier_attack_anim',
-      frames: this.anims.generateFrameNumbers('soldier_attack', { start: 0, end: 5 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'soldier_attack_down_anim',
-      frames: this.anims.generateFrameNumbers('soldier_attack_down', { start: 0, end: 5 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'soldier_attack_up_anim',
-      frames: this.anims.generateFrameNumbers('soldier_attack_up', { start: 0, end: 5 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'soldier_death_anim',
-      frames: this.anims.generateFrameNumbers('soldier_death', { start: 0, end: 3 }),
-      frameRate: 8,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'soldier_move_anim',
-      frames: this.anims.generateFrameNumbers('soldier_move', { start: 0, end: 7 }),
-      frameRate: 10,
-      repeat: -1,
-    });
-    this.anims.create({
-      key: 'soldier_hurt_anim',
-      frames: this.anims.generateFrameNumbers('soldier_hurt', { start: 0, end: 3 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-
-    // Vampire animations (32x32 frames)
-    // idle: 192/32 = 6, attack: 512/32 = 16, death: 448/32 = 14, move: 256/32 = 8, hurt: 160/32 = 5
-    this.anims.create({
-      key: 'vampire_idle_anim',
-      frames: this.anims.generateFrameNumbers('vampire_idle', { start: 0, end: 5 }),
-      frameRate: 6,
-      repeat: -1,
-    });
-    this.anims.create({
-      key: 'vampire_attack_anim',
-      frames: this.anims.generateFrameNumbers('vampire_attack', { start: 0, end: 15 }),
-      frameRate: 16,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'vampire_death_anim',
-      frames: this.anims.generateFrameNumbers('vampire_death', { start: 0, end: 13 }),
-      frameRate: 12,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: 'vampire_move_anim',
-      frames: this.anims.generateFrameNumbers('vampire_move', { start: 0, end: 7 }),
-      frameRate: 10,
-      repeat: -1,
-    });
-    this.anims.create({
-      key: 'vampire_hurt_anim',
-      frames: this.anims.generateFrameNumbers('vampire_hurt', { start: 0, end: 4 }),
-      frameRate: 10,
-      repeat: 0,
-    });
-  }
-
   private spawnUnits(): void {
     const scaledTileSize = this.tileSize * this.pixelScale;
     const occupiedTiles = new Set<string>();
@@ -502,24 +298,36 @@ export class CombatScene extends Phaser.Scene {
       return { x, y };
     };
 
-    // TEST: Soldier vs Orc vertical at (0,3) and (0,0)
-    const playerUnitTypes = [SOLDIER];
+    // TEST: All units battle
+    const playerUnitTypes = [SKELETON_WARRIOR, SKELETON_GUARD, ORC, SOLDIER, VAMPIRE, ARCHER, AXEMAN, KNIGHT, LANCER];
     const testPositions = [
-      { x: 0, y: 3 },  // Soldier at bottom
+      { x: 0, y: 0 },
+      { x: 0, y: 1 },
+      { x: 0, y: 2 },
+      { x: 0, y: 3 },
+      { x: 0, y: 4 },
+      { x: 0, y: 5 },
+      { x: 0, y: 6 },
+      { x: 0, y: 7 },
+      { x: 0, y: 8 },
     ];
     for (let i = 0; i < playerUnitTypes.length; i++) {
       const unitStats = playerUnitTypes[i];
       const pos = testPositions[i];
-      occupiedTiles.add(`${pos.x},${pos.y}`);
+      const unitSize = unitStats.size || 1;
+      // Mark all tiles occupied by this unit
+      for (let s = 0; s < unitSize; s++) {
+        occupiedTiles.add(`${pos.x + s},${pos.y}`);
+      }
       const animPrefix = unitStats.type;
-      const spriteScale = this.getSpriteScale(unitStats.type);
-      const originY = this.getSpriteOriginY(unitStats.type);
+      const spriteScale = getSpriteConfig(unitStats.type).scale;
+      const originY = getSpriteConfig(unitStats.type).originY;
 
-      const sprite = this.add.sprite(
-        this.gridOffsetX + pos.x * scaledTileSize + scaledTileSize / 2,
-        this.gridOffsetY + pos.y * scaledTileSize + scaledTileSize / 2,
-        `${animPrefix}_idle`
-      );
+      // Center sprite across all tiles the unit occupies
+      const spriteX = this.gridOffsetX + (pos.x + unitSize / 2) * scaledTileSize;
+      const spriteY = this.gridOffsetY + pos.y * scaledTileSize + scaledTileSize / 2;
+
+      const sprite = this.add.sprite(spriteX, spriteY, `${animPrefix}_idle`);
       sprite.setOrigin(0.5, originY);
       sprite.setScale(spriteScale);
       sprite.setDepth(10 + pos.y); // Lower rows render on top
@@ -536,29 +344,42 @@ export class CombatScene extends Phaser.Scene {
         state: 'moving',
         setCounter: 0,
         target: null,
+        chargeReady: true, // Lancers start with charge ready
       };
       this.units.push(unit);
       this.updateHealthTint(unit);
     }
 
-    // TEST: Orc above Soldier
-    const enemyUnitTypes = [ORC];
+    // TEST: All units battle - enemy side
+    const enemyUnitTypes = [SKELETON_WARRIOR, SKELETON_GUARD, ORC, SOLDIER, VAMPIRE, ARCHER, AXEMAN, KNIGHT, LANCER];
     const enemyTestPositions = [
-      { x: 0, y: 0 },  // Orc at (0,0) above Soldier at (0,3)
+      { x: 15, y: 0 },
+      { x: 15, y: 1 },
+      { x: 15, y: 2 },
+      { x: 15, y: 3 },
+      { x: 15, y: 4 },
+      { x: 15, y: 5 },
+      { x: 15, y: 6 },
+      { x: 15, y: 7 },
+      { x: 14, y: 8 },  // Lancer is size 2, so x=14 occupies 14-15
     ];
     for (let i = 0; i < enemyUnitTypes.length; i++) {
       const unitStats = enemyUnitTypes[i];
-      const pos = enemyTestPositions[i] || getRandomPosition(10, 15);
-      occupiedTiles.add(`${pos.x},${pos.y}`);
+      const pos = enemyTestPositions[i];
+      const unitSize = unitStats.size || 1;
+      // Mark all tiles occupied by this unit
+      for (let s = 0; s < unitSize; s++) {
+        occupiedTiles.add(`${pos.x + s},${pos.y}`);
+      }
       const animPrefix = unitStats.type;
-      const spriteScale = this.getSpriteScale(unitStats.type);
-      const originY = this.getSpriteOriginY(unitStats.type);
+      const spriteScale = getSpriteConfig(unitStats.type).scale;
+      const originY = getSpriteConfig(unitStats.type).originY;
 
-      const sprite = this.add.sprite(
-        this.gridOffsetX + pos.x * scaledTileSize + scaledTileSize / 2,
-        this.gridOffsetY + pos.y * scaledTileSize + scaledTileSize / 2,
-        `${animPrefix}_idle`
-      );
+      // Center sprite across all tiles the unit occupies
+      const spriteX = this.gridOffsetX + (pos.x + unitSize / 2) * scaledTileSize;
+      const spriteY = this.gridOffsetY + pos.y * scaledTileSize + scaledTileSize / 2;
+
+      const sprite = this.add.sprite(spriteX, spriteY, `${animPrefix}_idle`);
       sprite.setOrigin(0.5, originY);
       sprite.setScale(spriteScale);
       sprite.setDepth(10 + pos.y); // Lower rows render on top
@@ -576,6 +397,7 @@ export class CombatScene extends Phaser.Scene {
         state: 'moving',
         setCounter: 0,
         target: null,
+        chargeReady: true, // Lancers start with charge ready
       };
       this.units.push(unit);
       this.updateHealthTint(unit);
@@ -637,9 +459,20 @@ export class CombatScene extends Phaser.Scene {
       const visibleTarget = this.findNearestVisibleEnemy(unit, enemies);
 
       if (unit.state === 'attacking') {
-        // In attacking state - queue attack if target still in range
-        if (unit.target && unit.target.currentHp > 0) {
-          const distance = Math.max(Math.abs(unit.gridX - unit.target.gridX), Math.abs(unit.gridY - unit.target.gridY));
+        // Ranged units re-evaluate target each turn to always attack closest
+        if (unit.stats.attackRange > 1 && visibleTarget && visibleTarget.currentHp > 0) {
+          const distance = getUnitDistance(unit, visibleTarget);
+          if (distance <= unit.stats.attackRange) {
+            unit.target = visibleTarget;  // Update to closest target
+            pendingAttacks.push({ attacker: unit, defender: unit.target, initiative: unit.stats.initiative });
+          } else {
+            unit.state = 'moving';
+            unit.setCounter = 0;
+            unit.target = null;
+          }
+        } else if (unit.target && unit.target.currentHp > 0) {
+          // Melee units keep their locked target
+          const distance = getUnitDistance(unit, unit.target);
           if (distance <= unit.stats.attackRange) {
             pendingAttacks.push({ attacker: unit, defender: unit.target, initiative: unit.stats.initiative });
           } else {
@@ -667,12 +500,19 @@ export class CombatScene extends Phaser.Scene {
       } else {
         // Moving state
         if (visibleTarget && visibleTarget.currentHp > 0) {
-          const distance = Math.max(Math.abs(unit.gridX - visibleTarget.gridX), Math.abs(unit.gridY - visibleTarget.gridY));
+          const distance = getUnitDistance(unit, visibleTarget);
 
           if (distance <= unit.stats.attackRange) {
-            unit.state = 'setting';
-            unit.setCounter = 0;
-            unit.target = visibleTarget;
+            // Lancer charge: if chargeReady, skip setting and attack immediately
+            if (unit.stats.type === 'lancer' && unit.chargeReady) {
+              unit.state = 'attacking';
+              unit.target = visibleTarget;
+              pendingAttacks.push({ attacker: unit, defender: visibleTarget, initiative: unit.stats.initiative });
+            } else {
+              unit.state = 'setting';
+              unit.setCounter = 0;
+              unit.target = visibleTarget;
+            }
           } else {
             const move = this.getIntendedMove(unit, visibleTarget);
             if (move) intendedMoves.set(unit, move);
@@ -712,6 +552,40 @@ export class CombatScene extends Phaser.Scene {
     // Resolve move collisions
     this.resolveMovementCollisions(intendedMoves);
 
+    // Post-movement charge attacks: lancers that just moved into range attack immediately
+    const chargeAttacks: { attacker: Unit; defender: Unit }[] = [];
+    for (const [unit] of intendedMoves) {
+      if (unit.stats.type === 'lancer' && unit.chargeReady && unit.currentHp > 0) {
+        // Find nearest enemy in range
+        const enemies = unit.isPlayer
+          ? this.units.filter(u => !u.isPlayer && u.currentHp > 0)
+          : this.units.filter(u => u.isPlayer && u.currentHp > 0);
+
+        for (const enemy of enemies) {
+          const distance = getUnitDistance(unit, enemy);
+          if (distance <= unit.stats.attackRange) {
+            chargeAttacks.push({ attacker: unit, defender: enemy });
+            // After charge, go to 'setting' state so it waits before next attack
+            unit.state = 'setting';
+            unit.setCounter = 0;
+            unit.target = enemy;
+            break; // Only attack one target
+          }
+        }
+      }
+    }
+
+    // Execute charge attacks with a slight delay so movement animation completes first
+    if (chargeAttacks.length > 0) {
+      this.time.delayedCall(300, () => {
+        for (const { attacker, defender } of chargeAttacks) {
+          if (attacker.currentHp > 0 && defender.currentHp > 0) {
+            this.attack(attacker, defender);
+          }
+        }
+      });
+    }
+
     // Update fog of war after all movements
     this.updateFogOfWar();
 
@@ -720,9 +594,32 @@ export class CombatScene extends Phaser.Scene {
   }
 
   private getIntendedMove(unit: Unit, target: Unit): { x: number; y: number } | null {
-    const currentDist = Math.max(Math.abs(unit.gridX - target.gridX), Math.abs(unit.gridY - target.gridY));
+    const moveSpeed = unit.stats.moveSpeed || 1;
+    const unitSize = unit.stats.size || 1;
+    const targetSize = target.stats.size || 1;
 
-    // Get all possible moves (4 cardinal directions)
+    // Helper to calculate distance from hypothetical position to target
+    const calcDist = (fromX: number, fromY: number): number => {
+      const left1 = fromX;
+      const right1 = fromX + unitSize - 1;
+      const left2 = target.gridX;
+      const right2 = target.gridX + targetSize - 1;
+
+      let dx: number;
+      if (right1 < left2) {
+        dx = left2 - right1;
+      } else if (right2 < left1) {
+        dx = left1 - right2;
+      } else {
+        dx = 0;
+      }
+      const dy = Math.abs(fromY - target.gridY);
+      return Math.max(dx, dy);
+    };
+
+    const currentDist = calcDist(unit.gridX, unit.gridY);
+
+    // Get all possible moves (4 cardinal directions, up to moveSpeed tiles)
     const possibleMoves: { x: number; y: number; dist: number }[] = [];
     const directions = [
       { dx: 1, dy: 0 },
@@ -732,42 +629,59 @@ export class CombatScene extends Phaser.Scene {
     ];
 
     for (const dir of directions) {
-      const newX = unit.gridX + dir.dx;
-      const newY = unit.gridY + dir.dy;
+      // Try moving 1 to moveSpeed tiles in this direction
+      for (let steps = 1; steps <= moveSpeed; steps++) {
+        const newX = unit.gridX + dir.dx * steps;
+        const newY = unit.gridY + dir.dy * steps;
 
-      // Check bounds
-      if (newX < 0 || newX >= this.gridWidth || newY < 0 || newY >= this.gridHeight) {
-        continue;
+        // Check if unit can fit at new position (bounds + collision with size)
+        if (!canUnitFitAt(unit, newX, newY, this.gridWidth, this.gridHeight, this.units)) {
+          break; // Can't go further in this direction
+        }
+
+        // Also check that we don't pass through any units along the path
+        let pathClear = true;
+        for (let i = 1; i < steps; i++) {
+          const checkX = unit.gridX + dir.dx * i;
+          const checkY = unit.gridY + dir.dy * i;
+          if (!canUnitFitAt(unit, checkX, checkY, this.gridWidth, this.gridHeight, this.units)) {
+            pathClear = false;
+            break;
+          }
+        }
+        if (!pathClear) break;
+
+        // Calculate distance to target from this new position
+        const newDist = calcDist(newX, newY);
+        possibleMoves.push({ x: newX, y: newY, dist: newDist });
       }
-
-      // Check if tile is occupied by another unit
-      const occupied = this.units.some(
-        u => u !== unit && u.currentHp > 0 && u.gridX === newX && u.gridY === newY
-      );
-      if (occupied) continue;
-
-      // Calculate distance to target from this new position
-      const newDist = Math.max(Math.abs(newX - target.gridX), Math.abs(newY - target.gridY));
-      possibleMoves.push({ x: newX, y: newY, dist: newDist });
     }
 
     if (possibleMoves.length === 0) return null;
 
-    // Find the minimum distance among possible moves
-    const minDist = Math.min(...possibleMoves.map(m => m.dist));
-
-    // Filter to only moves that make progress (or at least don't go backwards)
+    // Filter to moves that make progress toward the target
     let bestMoves = possibleMoves.filter(m => m.dist < currentDist);
 
-    // If no progress moves available, try moves that maintain distance
+    // If no progress moves, try moves that maintain distance
     if (bestMoves.length === 0) {
       bestMoves = possibleMoves.filter(m => m.dist === currentDist);
     }
 
-    // If still nothing, take any available move
+    // If still nothing, consider backwards moves but only 20% of the time
     if (bestMoves.length === 0) {
-      bestMoves = possibleMoves;
+      if (Math.random() < 0.2) {
+        bestMoves = possibleMoves.filter(m => m.dist > currentDist);
+      }
     }
+
+    // If no valid moves, stay put
+    if (bestMoves.length === 0) {
+      return null;
+    }
+
+    // Prefer the move that gets closest to target
+    const bestDist = Math.min(...bestMoves.map(m => m.dist));
+    bestMoves = bestMoves.filter(m => m.dist === bestDist);
 
     // Randomize among equally good options
     const chosen = bestMoves[Math.floor(Math.random() * bestMoves.length)];
@@ -776,40 +690,73 @@ export class CombatScene extends Phaser.Scene {
 
   private getForwardMove(unit: Unit): { x: number; y: number } | null {
     const forwardDir = unit.isPlayer ? 1 : -1;
+    const moveSpeed = unit.stats.moveSpeed || 1;
 
     // Try to move forward, but pathfind around obstacles
-    const possibleMoves: { x: number; y: number; priority: number }[] = [];
-    const directions = [
-      { dx: forwardDir, dy: 0, priority: 0 },   // Forward (best)
-      { dx: forwardDir, dy: -1, priority: 1 },  // Forward-up
-      { dx: forwardDir, dy: 1, priority: 1 },   // Forward-down
-      { dx: 0, dy: -1, priority: 2 },           // Up (sidestep)
-      { dx: 0, dy: 1, priority: 2 },            // Down (sidestep)
-    ];
+    const possibleMoves: { x: number; y: number; priority: number; distance: number }[] = [];
 
-    for (const dir of directions) {
-      const newX = unit.gridX + dir.dx;
-      const newY = unit.gridY + dir.dy;
+    // For moveSpeed > 1, prioritize moving multiple tiles forward
+    for (let steps = moveSpeed; steps >= 1; steps--) {
+      // Priority: straight forward > sidestep (no diagonals for multi-tile movers)
+      const directions = [
+        { dx: forwardDir * steps, dy: 0, priority: 0 },   // Forward (best)
+      ];
 
-      // Check bounds
-      if (newX < 0 || newX >= this.gridWidth || newY < 0 || newY >= this.gridHeight) {
-        continue;
+      // Only allow sidestep for single-step moves
+      // Multi-tile movers (like lancers) can only move in straight lines
+      if (steps === 1) {
+        // For units with moveSpeed > 1, only allow cardinal directions (no diagonals)
+        if (moveSpeed === 1) {
+          directions.push(
+            { dx: forwardDir, dy: -1, priority: 1 },  // Forward-up (diagonal)
+            { dx: forwardDir, dy: 1, priority: 1 },   // Forward-down (diagonal)
+          );
+        }
+        directions.push(
+          { dx: 0, dy: -1, priority: 2 },           // Up (sidestep, cardinal)
+          { dx: 0, dy: 1, priority: 2 },            // Down (sidestep, cardinal)
+        );
       }
 
-      // Check if tile is occupied
-      const occupied = this.units.some(
-        u => u !== unit && u.currentHp > 0 && u.gridX === newX && u.gridY === newY
-      );
-      if (occupied) continue;
+      for (const dir of directions) {
+        const newX = unit.gridX + dir.dx;
+        const newY = unit.gridY + dir.dy;
 
-      possibleMoves.push({ x: newX, y: newY, priority: dir.priority });
+        // Check if unit can fit at destination
+        if (!canUnitFitAt(unit, newX, newY, this.gridWidth, this.gridHeight, this.units)) {
+          continue;
+        }
+
+        // For multi-tile moves, check all tiles in the path
+        let pathClear = true;
+        const totalSteps = Math.abs(dir.dx) + Math.abs(dir.dy);
+        if (totalSteps > 1) {
+          const stepDx = dir.dx > 0 ? 1 : dir.dx < 0 ? -1 : 0;
+          const stepDy = dir.dy > 0 ? 1 : dir.dy < 0 ? -1 : 0;
+          for (let i = 1; i < totalSteps; i++) {
+            const checkX = unit.gridX + stepDx * i;
+            const checkY = unit.gridY + stepDy * i;
+            if (!canUnitFitAt(unit, checkX, checkY, this.gridWidth, this.gridHeight, this.units)) {
+              pathClear = false;
+              break;
+            }
+          }
+        }
+
+        if (!pathClear) continue;
+
+        possibleMoves.push({ x: newX, y: newY, priority: dir.priority, distance: steps });
+      }
     }
 
     if (possibleMoves.length === 0) return null;
 
-    // Find best priority
-    const bestPriority = Math.min(...possibleMoves.map(m => m.priority));
-    const bestMoves = possibleMoves.filter(m => m.priority === bestPriority);
+    // Prefer moving more tiles forward, then by priority
+    const maxDist = Math.max(...possibleMoves.map(m => m.distance));
+    let bestMoves = possibleMoves.filter(m => m.distance === maxDist);
+
+    const bestPriority = Math.min(...bestMoves.map(m => m.priority));
+    bestMoves = bestMoves.filter(m => m.priority === bestPriority);
 
     // Randomize among equally good options
     const chosen = bestMoves[Math.floor(Math.random() * bestMoves.length)];
@@ -819,45 +766,77 @@ export class CombatScene extends Phaser.Scene {
   private resolveMovementCollisions(intendedMoves: Map<Unit, { x: number; y: number }>): void {
     const scaledTileSize = this.tileSize * this.pixelScale;
 
-    // Group moves by destination
-    const movesByDest: Map<string, Unit[]> = new Map();
-    for (const [unit, move] of intendedMoves) {
-      const key = `${move.x},${move.y}`;
-      if (!movesByDest.has(key)) movesByDest.set(key, []);
-      movesByDest.get(key)!.push(unit);
-    }
-
-    // Process each destination
-    for (const [destKey, units] of movesByDest) {
-      const [destX, destY] = destKey.split(',').map(Number);
-
-      // Check if destination is already occupied by a non-moving unit
-      const occupiedByStationary = this.units.some(
-        u => u.currentHp > 0 && u.gridX === destX && u.gridY === destY && !intendedMoves.has(u)
-      );
-
-      if (occupiedByStationary) {
-        // Can't move there, none of these units move
-        continue;
-      }
-
-      if (units.length === 1) {
-        // Single unit moving to this spot - execute move
-        const unit = units[0];
-        this.executeMove(unit, destX, destY, scaledTileSize);
-      } else {
-        // Multiple units want same spot - randomize winner, neither enters attack mode
-        const winner = units[Math.floor(Math.random() * units.length)];
-        this.executeMove(winner, destX, destY, scaledTileSize);
-
-        // Losers stay in moving state (reset any setting progress)
-        for (const loser of units) {
-          if (loser !== winner) {
-            loser.state = 'moving';
-            loser.setCounter = 0;
-            loser.target = null;
+    // Check if two units would collide at their positions
+    const wouldCollide = (unit1: Unit, pos1: { x: number; y: number }, unit2: Unit, pos2: { x: number; y: number }): boolean => {
+      const size1 = unit1.stats.size || 1;
+      const size2 = unit2.stats.size || 1;
+      // Check if any tiles overlap
+      for (let i = 0; i < size1; i++) {
+        for (let j = 0; j < size2; j++) {
+          if (pos1.x + i === pos2.x + j && pos1.y === pos2.y) {
+            return true;
           }
         }
+      }
+      return false;
+    };
+
+    // Track which units have successfully moved
+    const movedUnits: Set<Unit> = new Set();
+    const finalPositions: Map<Unit, { x: number; y: number }> = new Map();
+
+    // First pass: Check each move against stationary units
+    for (const [unit, move] of intendedMoves) {
+      // Check collision with stationary units (not moving this turn)
+      let blocked = false;
+      for (const other of this.units) {
+        if (other === unit || other.currentHp <= 0 || intendedMoves.has(other)) continue;
+        if (wouldCollide(unit, move, other, { x: other.gridX, y: other.gridY })) {
+          blocked = true;
+          break;
+        }
+      }
+      if (!blocked) {
+        finalPositions.set(unit, move);
+      }
+    }
+
+    // Second pass: Resolve collisions between moving units
+    const unitsToMove = Array.from(finalPositions.keys());
+    for (let i = 0; i < unitsToMove.length; i++) {
+      const unit1 = unitsToMove[i];
+      const pos1 = finalPositions.get(unit1)!;
+
+      for (let j = i + 1; j < unitsToMove.length; j++) {
+        const unit2 = unitsToMove[j];
+        const pos2 = finalPositions.get(unit2)!;
+
+        if (wouldCollide(unit1, pos1, unit2, pos2)) {
+          // Collision! Randomly pick a winner
+          const loser = Math.random() < 0.5 ? unit1 : unit2;
+          finalPositions.delete(loser);
+          // Update the list
+          const loserIdx = unitsToMove.indexOf(loser);
+          if (loserIdx > i) {
+            unitsToMove.splice(loserIdx, 1);
+            j--; // Adjust index since we removed an element
+          }
+        }
+      }
+    }
+
+    // Execute all valid moves
+    for (const [unit, move] of finalPositions) {
+      this.executeMove(unit, move.x, move.y, scaledTileSize);
+      movedUnits.add(unit);
+    }
+
+    // Reset state for units that couldn't move due to collision
+    for (const [unit] of intendedMoves) {
+      if (!movedUnits.has(unit)) {
+        unit.state = 'moving';
+        unit.setCounter = 0;
+        unit.target = null;
       }
     }
   }
@@ -869,14 +848,21 @@ export class CombatScene extends Phaser.Scene {
     unit.gridX = destX;
     unit.gridY = destY;
 
+    // Lancer charge: moving refreshes charge attack
+    if (unit.stats.type === 'lancer') {
+      unit.chargeReady = true;
+    }
+
     // Update depth so lower rows render on top
     unit.sprite.setDepth(10 + unit.gridY);
 
-    const worldX = this.gridOffsetX + unit.gridX * scaledTileSize + scaledTileSize / 2;
+    // Center sprite across all tiles the unit occupies
+    const unitSize = unit.stats.size || 1;
+    const worldX = this.gridOffsetX + (unit.gridX + unitSize / 2) * scaledTileSize;
     const worldY = this.gridOffsetY + unit.gridY * scaledTileSize + scaledTileSize / 2;
 
     // Play move animation
-    const prefix = this.getAnimPrefix(unit);
+    const prefix = getAnimPrefix(unit.stats.type);
     unit.sprite.play(`${prefix}_move_anim`);
 
     this.tweens.add({
@@ -909,8 +895,8 @@ export class CombatScene extends Phaser.Scene {
       // Check if unit can see this enemy
       if (!this.canSeeEnemy(unit, enemy)) continue;
 
-      // Chebyshev distance - diagonals count as 1
-      const distance = Math.max(Math.abs(unit.gridX - enemy.gridX), Math.abs(unit.gridY - enemy.gridY));
+      // Use unit distance calculation that considers unit sizes
+      const distance = getUnitDistance(unit, enemy);
       if (distance < minDistance) {
         minDistance = distance;
         nearest = enemy;
@@ -920,92 +906,84 @@ export class CombatScene extends Phaser.Scene {
     return nearest;
   }
 
-  private getAnimPrefix(unit: Unit): string {
-    switch (unit.stats.type) {
-      case 'skeleton1': return 'skeleton1';
-      case 'skeleton2': return 'skeleton2';
-      case 'orc': return 'orc';
-      case 'soldier': return 'soldier';
-      case 'vampire': return 'vampire';
-      default: return 'skeleton1';
-    }
-  }
-
-  private getSpriteScale(unitType: string): number {
-    // Different sprites have different base sizes AND different character sizes within frames
-    // Target: all characters appear roughly the same size on screen (~64px)
-    switch (unitType) {
-      case 'orc':
-        return 1.92; // 100x100 frame, reduced 20%
-      case 'soldier':
-        return 2.0; // 100x100 frame, reduced 20%
-      default:
-        return this.pixelScale; // 32x32 * 2 = 64x64 for skeleton/vampire
-    }
-  }
-
-  private getSpriteFrameSize(unitType: string): number {
-    // Returns the base frame size before scaling
-    switch (unitType) {
-      case 'orc':
-      case 'soldier':
-        return 100;
-      default:
-        return 32;
-    }
-  }
-
-  private getSpriteYOffset(unitType: string): number {
-    // Vertical adjustment - not needed with proper origin
-    return 0;
-  }
-
-  private getSpriteOriginY(unitType: string): number {
-    // Y origin based on where character's feet are in sprite frame
-    // Value = feet position / frame height
-    switch (unitType) {
-      case 'orc':
-        return 0.56; // Orc feet at y=56 in 100x100 frame
-      case 'soldier':
-        return 0.56; // Soldier feet at y=56 in 100x100 frame
-      default:
-        return 0.7; // Skeleton/vampire - character fills 32x32 frame
-    }
-  }
-
   private attack(attacker: Unit, defender: Unit): void {
+    // Check for lancer charge attack (1.2x base damage)
+    let attackerStats = attacker.stats;
+    const isChargeAttack = attacker.stats.type === 'lancer' && attacker.chargeReady;
+    if (isChargeAttack) {
+      // Create modified stats with 1.2x attack for charge
+      attackerStats = { ...attacker.stats, attack: Math.round(attacker.stats.attack * 1.2) };
+      attacker.chargeReady = false; // Consume the charge
+    }
+
     // Calculate damage using the stats system
-    const { damage, isCrit } = calculateDamage(attacker.stats, defender.stats);
+    const { damage, isCrit } = calculateDamage(attackerStats, defender.stats);
 
     defender.currentHp = Math.max(0, defender.currentHp - damage);
+
+    // Apply lifesteal
+    if (attacker.stats.lifesteal > 0) {
+      const healAmount = Math.floor(damage * attacker.stats.lifesteal);
+      attacker.currentHp = Math.min(attacker.stats.hp, attacker.currentHp + healAmount);
+      this.updateHealthTint(attacker);
+    }
 
     // Calculate direction to defender
     const dx = defender.gridX - attacker.gridX;
     const dy = defender.gridY - attacker.gridY;
 
     // Determine attack direction and play appropriate animation
-    const attackerPrefix = this.getAnimPrefix(attacker);
+    const attackerPrefix = getAnimPrefix(attacker.stats.type);
     let attackAnim = `${attackerPrefix}_attack_anim`;
+    let attackAngle = 0;  // Rotation angle for diagonal attacks
+
+    // Lancer never rotates and always uses regular attack animation
+    const isLancer = attacker.stats.type === 'lancer';
 
     if (dx === 0) {
       // Vertical attack (same column)
       if (dy > 0) {
-        // Attacking DOWN - use down animation if available
-        const downAnim = `${attackerPrefix}_attack_down_anim`;
-        if (this.anims.exists(downAnim)) {
-          attackAnim = downAnim;
+        // Attacking DOWN - use down animation if available (but not for lancer)
+        if (!isLancer) {
+          const downAnim = `${attackerPrefix}_attack_down_anim`;
+          if (this.anims.exists(downAnim)) {
+            attackAnim = downAnim;
+          }
+          // Rotate sprite to point sword swing downward
+          attackAngle = 25;
+          attacker.sprite.setAngle(attackAngle);
         }
       } else {
-        // Attacking UP - use up animation if available
-        const upAnim = `${attackerPrefix}_attack_up_anim`;
-        if (this.anims.exists(upAnim)) {
-          attackAnim = upAnim;
+        // Attacking UP - use up animation if available (but not for lancer)
+        if (!isLancer) {
+          const upAnim = `${attackerPrefix}_attack_up_anim`;
+          if (this.anims.exists(upAnim)) {
+            attackAnim = upAnim;
+          }
+          // Rotate sprite to point sword swing upward
+          attackAngle = -25;
+          attacker.sprite.setAngle(attackAngle);
         }
       }
     } else {
       // Horizontal or diagonal - use flipX
       if (dx > 0) attacker.sprite.setFlipX(false);
       else attacker.sprite.setFlipX(true);
+
+      // For diagonal attacks, rotate sprite slightly to face target
+      if (dy !== 0) {
+        // Calculate angle to target (in degrees)
+        const angleRad = Math.atan2(dy, Math.abs(dx));
+        attackAngle = angleRad * (180 / Math.PI);
+        // Lancer uses smaller rotation, others use more
+        const maxAngle = isLancer ? 25 : 45;
+        attackAngle = Math.max(-maxAngle, Math.min(maxAngle, attackAngle));
+        // When sprite is flipped, invert the angle so it points correctly
+        if (dx < 0) {
+          attackAngle = -attackAngle;
+        }
+        attacker.sprite.setAngle(attackAngle);
+      }
     }
 
     // Play attack animation
@@ -1013,64 +991,147 @@ export class CombatScene extends Phaser.Scene {
     attacker.sprite.once('animationcomplete', () => {
       if (attacker.currentHp > 0) {
         attacker.sprite.play(`${attackerPrefix}_idle_anim`);
+        // Reset rotation after attack
+        attacker.sprite.setAngle(0);
       }
     });
 
-    // Play hurt animation on defender (but don't interrupt attack animations)
-    const defenderPrefix = this.getAnimPrefix(defender);
-    const currentAnim = defender.sprite.anims.currentAnim?.key || '';
-    const isDefenderAttacking = currentAnim.includes('_attack');
+    // For ranged attacks, spawn a projectile
+    const isRanged = attacker.stats.attackRange > 1;
+    const defenderPrefix = getAnimPrefix(defender.stats.type);
 
-    if (defender.currentHp > 0 && !isDefenderAttacking) {
-      defender.sprite.play(`${defenderPrefix}_hurt_anim`);
-      defender.sprite.once('animationcomplete', () => {
+    if (isRanged && attacker.stats.type === 'archer') {
+      // Spawn arrow projectile at end of animation when bow releases (9 frames at 12fps = 750ms)
+      this.time.delayedCall(750, () => {
+        this.spawnProjectile(attacker, defender, 'arrow', damage, isCrit, defenderPrefix);
+      });
+    } else {
+      // Melee attack - use fixed delay
+      const hitDelay = 300;
+      this.applyDamageEffects(defender, damage, isCrit, defenderPrefix, hitDelay);
+    }
+  }
+
+  /** Spawn a projectile that flies from attacker to defender */
+  private spawnProjectile(
+    attacker: Unit,
+    defender: Unit,
+    projectileKey: string,
+    damage: number,
+    isCrit: boolean,
+    defenderPrefix: string
+  ): void {
+    // Calculate angle to target
+    const dx = defender.sprite.x - attacker.sprite.x;
+    const dy = defender.sprite.y - attacker.sprite.y;
+    const angle = Math.atan2(dy, dx);
+    const angleDeg = angle * (180 / Math.PI);
+
+    // Offset arrow spawn point to come from the bow (in front of archer)
+    const bowOffset = 20; // pixels in front of archer where bow is held
+    const bowHeightOffset = -19; // arrow height relative to sprite anchor
+    const offsetX = Math.cos(angle) * bowOffset;
+    const offsetY = Math.sin(angle) * bowOffset + bowHeightOffset;
+
+    // Create projectile at bow position
+    const projectile = this.add.image(
+      attacker.sprite.x + offsetX,
+      attacker.sprite.y + offsetY,
+      projectileKey
+    );
+    projectile.setScale(1.0); // Scale the arrow
+    projectile.setDepth(15); // Above units
+    projectile.setAngle(angleDeg);
+
+    // Calculate flight time based on distance
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    const flightTime = Math.max(200, distance * 1.5); // Min 200ms, scales with distance
+
+    // Animate projectile flying to target
+    this.tweens.add({
+      targets: projectile,
+      x: defender.sprite.x,
+      y: defender.sprite.y,
+      duration: flightTime,
+      ease: 'Linear',
+      onComplete: () => {
+        projectile.destroy();
+        // Apply damage when projectile arrives
+        this.applyDamageEffects(defender, damage, isCrit, defenderPrefix, 0);
+      },
+    });
+  }
+
+  /** Apply damage effects (hurt anim, flash, damage number, death check) */
+  private applyDamageEffects(
+    defender: Unit,
+    damage: number,
+    isCrit: boolean,
+    defenderPrefix: string,
+    delay: number
+  ): void {
+    const applyEffects = () => {
+      // Play hurt animation on defender (but don't interrupt attack animations)
+      const currentAnim = defender.sprite.anims.currentAnim?.key || '';
+      const isDefenderAttacking = currentAnim.includes('_attack');
+
+      if (defender.currentHp > 0 && !isDefenderAttacking) {
+        defender.sprite.play(`${defenderPrefix}_hurt_anim`);
+        defender.sprite.once('animationcomplete', () => {
+          if (defender.currentHp > 0) {
+            defender.sprite.play(`${defenderPrefix}_idle_anim`);
+          }
+        });
+      }
+
+      // Damage flash (then restore health-based tint)
+      defender.sprite.setTint(isCrit ? 0xffff00 : 0xff0000);
+      this.time.delayedCall(120, () => {
         if (defender.currentHp > 0) {
-          defender.sprite.play(`${defenderPrefix}_idle_anim`);
+          this.updateHealthTint(defender);
         }
       });
-    }
 
-    // Damage flash (then restore health-based tint)
-    defender.sprite.setTint(isCrit ? 0xffff00 : 0xff0000);
-    this.time.delayedCall(120, () => {
-      if (defender.currentHp > 0) {
-        this.updateHealthTint(defender);
+      // Show damage number
+      const damageColor = isCrit ? '#ffff00' : '#ff0000';
+      const damageText = this.add.text(
+        defender.sprite.x,
+        defender.sprite.y - 20,
+        isCrit ? `CRIT! -${damage}` : `-${damage}`,
+        {
+          fontSize: isCrit ? '18px' : '14px',
+          color: damageColor,
+          fontFamily: 'monospace',
+          fontStyle: 'bold',
+          stroke: '#000000',
+          strokeThickness: 2,
+        }
+      ).setOrigin(0.5);
+
+      this.tweens.add({
+        targets: damageText,
+        y: damageText.y - 30,
+        alpha: 0,
+        duration: 800,
+        onComplete: () => damageText.destroy(),
+      });
+
+      // Update health tint
+      this.updateHealthTint(defender);
+
+      // Check for death
+      if (defender.currentHp <= 0) {
+        // Play death animation
+        defender.sprite.play(`${defenderPrefix}_death_anim`);
+        defender.sprite.setDepth(1); // Dead units below living
+        defender.sprite.setTint(0x666666); // Gray tint for dead units
       }
-    });
+    };
 
-    // Show damage number
-    const damageColor = isCrit ? '#ffff00' : '#ff0000';
-    const damageText = this.add.text(
-      defender.sprite.x,
-      defender.sprite.y - 20,
-      isCrit ? `CRIT! -${damage}` : `-${damage}`,
-      {
-        fontSize: isCrit ? '18px' : '14px',
-        color: damageColor,
-        fontFamily: 'monospace',
-        fontStyle: 'bold',
-        stroke: '#000000',
-        strokeThickness: 2,
-      }
-    ).setOrigin(0.5);
-
-    this.tweens.add({
-      targets: damageText,
-      y: damageText.y - 30,
-      alpha: 0,
-      duration: 800,
-      onComplete: () => damageText.destroy(),
-    });
-
-    // Update health bar
-    this.updateHealthTint(defender);
-
-    // Check for death
-    if (defender.currentHp <= 0) {
-      // Play death animation
-      defender.sprite.play(`${defenderPrefix}_death_anim`);
-      defender.sprite.setDepth(1); // Dead units below living
-      defender.sprite.setTint(0x666666); // Gray tint for dead units
+    if (delay > 0) {
+      this.time.delayedCall(delay, applyEffects);
+    } else {
+      applyEffects();
     }
   }
 
