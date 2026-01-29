@@ -151,6 +151,34 @@ export const MINIMAP_COLORS = {
 } as const;
 
 // =============================================================================
+// INTERACTABLE TILES
+// =============================================================================
+
+/** Tiles that trigger interactions when the hero steps on them */
+export const INTERACTABLE_TILES = {
+  /** Town/castle entrance tiles */
+  TOWN: [
+    TERRAIN_BUILDINGS.BLACK_TOWER.ENTRANCE,  // 183
+    TERRAIN_BUILDINGS.SANCTUARY.ENTRANCE,    // 186
+  ],
+  /** Shrine tiles (future) */
+  SHRINE: [] as number[],
+  /** Chest tiles (future) */
+  CHEST: [] as number[],
+  /** NPC tiles (future) */
+  NPC: [] as number[],
+} as const;
+
+/** Map terrain tile ID to interaction type */
+export function getInteractionType(terrainId: number): 'town' | 'shrine' | 'chest' | 'npc' | null {
+  if (INTERACTABLE_TILES.TOWN.includes(terrainId)) return 'town';
+  if (INTERACTABLE_TILES.SHRINE.includes(terrainId)) return 'shrine';
+  if (INTERACTABLE_TILES.CHEST.includes(terrainId)) return 'chest';
+  if (INTERACTABLE_TILES.NPC.includes(terrainId)) return 'npc';
+  return null;
+}
+
+// =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
 

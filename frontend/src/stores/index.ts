@@ -5,3 +5,4 @@
  */
 
 export { useCombatStore, CombatStoreProvider } from './combatStore';
+export { useInteractionStore, InteractionStoreProvider } from './interactionStore';

@@ -23,12 +23,12 @@ export interface HeroConfig {
 }
 
 const DEFAULT_CONFIG: HeroConfig = {
-  frameWidth: 96,
-  frameHeight: 68,
-  frameCount: 8,
-  frameRate: 10,
-  scale: 0.5,
-  moveDuration: 150,
+  frameWidth: 396,
+  frameHeight: 672,
+  frameCount: 4,
+  frameRate: 8,
+  scale: 0.05,
+  moveDuration: 280,
 };
 
 /** All 8 movement directions */
@@ -38,6 +38,43 @@ const DIRECTIONS = [
 ] as const;
 
 export type Direction = typeof DIRECTIONS[number];
+
+/** Directions that have their own sprite sheets (others are mirrored) */
+const SPRITE_DIRECTIONS = ['south', 'south_east', 'east', 'north_east', 'north'] as const;
+
+/** Mapping for mirrored directions: west uses east sprites with flipX, etc. */
+const MIRROR_MAP: Partial<Record<Direction, typeof SPRITE_DIRECTIONS[number]>> = {
+  'west': 'east',
+  'north_west': 'north_east',
+  'south_west': 'south_east',
+};
+
+/** Check if a direction needs to be mirrored (flipped horizontally) */
+function needsMirror(direction: Direction): boolean {
+  return direction in MIRROR_MAP;
+}
+
+/** Get the base sprite direction for any direction */
+function getSpriteDirection(direction: Direction): typeof SPRITE_DIRECTIONS[number] {
+  return MIRROR_MAP[direction] ?? direction as typeof SPRITE_DIRECTIONS[number];
+}
+
+/** Per-direction scale factors for perspective and sprite size normalization */
+const DIRECTION_SCALE_FACTORS: Record<Direction, number> = {
+  'north': 0.7,
+  'north_east': 0.7,
+  'north_west': 0.7,
+  'south': 0.75,
+  'south_east': 0.75,
+  'south_west': 0.75,
+  'east': 1.0,
+  'west': 1.0,
+};
+
+/** Get scale factor for direction (perspective scaling) */
+function getDirectionScaleFactor(direction: Direction): number {
+  return DIRECTION_SCALE_FACTORS[direction];
+}
 
 /**
  * Hero entity for overworld exploration
@@ -74,16 +111,17 @@ export class Hero {
     // Create animations
     this.createAnimations();
 
-    // Create sprite
+    // Create sprite with initial direction scale applied
     const worldPos = this.tileToWorld(tileX, tileY);
     this.sprite = scene.add.sprite(worldPos.x, worldPos.y, 'hero_south', 0);
     this.sprite.setDepth(10);
     this.sprite.setOrigin(0.5, 1.0);  // Bottom-center anchor for stable feet
-    this.sprite.setScale(this.config.scale);
+    this.sprite.setScale(this.config.scale * getDirectionScaleFactor(this._direction));
   }
 
   /**
    * Preload hero assets (call in scene.preload)
+   * Only loads 5 sprite sheets - west directions are mirrored from east
    */
   static preload(scene: Phaser.Scene, config: Partial<HeroConfig> = {}): void {
     const frameConfig = {
@@ -91,7 +129,7 @@ export class Hero {
       frameHeight: config.frameHeight ?? DEFAULT_CONFIG.frameHeight,
     };
 
-    for (const dir of DIRECTIONS) {
+    for (const dir of SPRITE_DIRECTIONS) {
       scene.load.spritesheet(
         `hero_${dir}`,
         `assets/units/hero/hero_${dir}.png`,
@@ -101,12 +139,13 @@ export class Hero {
   }
 
   /**
-   * Create walk and idle animations for all directions
+   * Create walk and idle animations for sprite directions only
+   * Mirrored directions (west, etc.) use the same animations with flipX
    */
   private createAnimations(): void {
     const { frameCount, frameRate } = this.config;
 
-    for (const dir of DIRECTIONS) {
+    for (const dir of SPRITE_DIRECTIONS) {
       // Walking animation
       this.scene.anims.create({
         key: `hero_walk_${dir}`,
@@ -125,6 +164,21 @@ export class Hero {
         frameRate: 1,
       });
     }
+  }
+
+  /**
+   * Play animation for a direction, handling mirroring and perspective scaling
+   */
+  private playDirectionalAnim(type: 'walk' | 'idle', direction: Direction): void {
+    const spriteDir = getSpriteDirection(direction);
+    const shouldMirror = needsMirror(direction);
+
+    // Apply perspective scaling based on direction
+    const scale = this.config.scale * getDirectionScaleFactor(direction);
+
+    this.sprite.setFlipX(shouldMirror);
+    this.sprite.setScale(scale);
+    this.sprite.play(`hero_${type}_${spriteDir}`, true);
   }
 
   /**
@@ -154,8 +208,8 @@ export class Hero {
     const dy = targetTileY - this._tileY;
     this._direction = getDirectionFromDelta(dx, dy) as Direction;
 
-    // Play walking animation
-    this.sprite.play(`hero_walk_${this._direction}`, true);
+    // Play walking animation (handles mirroring)
+    this.playDirectionalAnim('walk', this._direction);
 
     // Calculate target world position
     const target = this.tileToWorld(targetTileX, targetTileY);
@@ -201,11 +255,10 @@ export class Hero {
   }
 
   /**
-   * Stop any playing animation and show idle
+   * Stop any playing animation and stay on current frame
    */
   stopAnimation(): void {
     this.sprite.anims.stop();
-    this.sprite.play(`hero_idle_${this._direction}`, true);
   }
 
   /**
@@ -223,9 +276,6 @@ export class Hero {
    */
   setDirection(direction: Direction): void {
     this._direction = direction;
-    if (!this._isMoving) {
-      this.sprite.play(`hero_idle_${direction}`, true);
-    }
   }
 
   // Getters

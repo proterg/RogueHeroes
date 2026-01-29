@@ -12,7 +12,11 @@ import Phaser from 'phaser';
 import { startCombat } from '../../api/combat';
 import { UnitData } from '../../types/combat';
 import { MapData, OVERWORLD_TILESET, isTileWalkable } from '../../types/mapEditor';
-import { MINIMAP_COLORS } from '../../types/tiles';
+import { MINIMAP_COLORS, getInteractionType } from '../../types/tiles';
+import { InteractionTrigger } from '../../types/interaction';
+import { MapConfig, TownConfig } from '../../types/mapConfig';
+import { getInteractionDataFromConfig, getInteractionId } from '../data/InteractionData';
+import { getStartingMap, getMapConfig, getSpawnPosition, getLocationAtTile } from '../data/maps';
 import { Hero } from '../entities/Hero';
 import { FogOfWar } from '../systems/FogOfWar';
 import { Minimap } from '../systems/Minimap';
@@ -30,24 +34,19 @@ const VIEWPORT = {
 
 /** Vision radii in tiles */
 const VISION = {
-  HERO_RADIUS: 4,
-  TOWN_RADIUS: 5,
-} as const;
-
-/** Player's town location */
-const PLAYER_TOWN = {
-  X: 2,
-  Y: 3,
-} as const;
-
-/** Hero starting position */
-const HERO_START = {
-  X: 2,
-  Y: 12,
+  HERO_RADIUS: 3,
 } as const;
 
 /** Minimap scale (pixels per tile) */
 const MINIMAP_SCALE = 6;
+
+/** Data passed to scene init() for map loading */
+export interface OverworldSceneData {
+  /** Map ID to load (defaults to starting map) */
+  mapId?: string;
+  /** Map ID we're entering from (for spawn point selection) */
+  entryFrom?: string;
+}
 
 // =============================================================================
 // SCENE
@@ -59,27 +58,44 @@ export class OverworldScene extends Phaser.Scene {
   private fog!: FogOfWar;
   private minimap!: Minimap;
 
-  // Map data
+  // Map configuration (from registry)
+  private currentMapConfig!: MapConfig;
+
+  // Map data (loaded from JSON file)
   private mapData: MapData | null = null;
   private tilemap: Phaser.Tilemaps.Tilemap | null = null;
   private terrainLayer: Phaser.Tilemaps.TilemapLayer | null = null;
   private decorationLayer: Phaser.Tilemaps.TilemapLayer | null = null;
 
+  // Scene initialization data
+  private initData: OverworldSceneData = {};
+
   // Viewport position (top-left tile)
   private viewportX = 0;
   private viewportY = 0;
+
+  // Smooth camera tracking
+  private cameraTargetX = 0;
+  private cameraTargetY = 0;
+  private cameraVelocityX = 0;
+  private cameraVelocityY = 0;
 
   // Debug overlay
   private debugOverlay: Phaser.GameObjects.Graphics | null = null;
   private debugMode = false;
 
-  // Town flag graphic
-  private townFlag!: Phaser.GameObjects.Graphics;
-
   // Path preview
   private pendingPath: { x: number; y: number }[] = [];
   private pathSprites: Phaser.GameObjects.Sprite[] = [];
   private pendingDestination: { x: number; y: number } | null = null;
+
+  // Input locking (for modal interactions)
+  private isInputLocked = false;
+
+  // Background music and ambient sounds
+  private overworldMusic: Phaser.Sound.BaseSound | null = null;
+  private ambientSounds: Phaser.Sound.BaseSound | null = null;
+  private horseWalkingSound: Phaser.Sound.BaseSound | null = null;
 
   constructor() {
     super({ key: 'OverworldScene' });
@@ -89,31 +105,57 @@ export class OverworldScene extends Phaser.Scene {
   // LIFECYCLE
   // ===========================================================================
 
+  /**
+   * Initialize the scene with optional map data
+   * @param data - Optional scene data specifying which map to load
+   */
+  init(data?: OverworldSceneData): void {
+    this.initData = data ?? {};
+
+    // Load map config from registry
+    if (this.initData.mapId) {
+      const config = getMapConfig(this.initData.mapId);
+      if (!config) {
+        console.error(`Map '${this.initData.mapId}' not found in registry, using starting map`);
+        this.currentMapConfig = getStartingMap();
+      } else {
+        this.currentMapConfig = config;
+      }
+    } else {
+      this.currentMapConfig = getStartingMap();
+    }
+  }
+
   preload(): void {
     // Tileset
     this.load.image(OVERWORLD_TILESET.key, OVERWORLD_TILESET.path);
 
-    // Map data
-    this.load.json('tutorial00', 'assets/maps/tutorial00.json');
+    // Map data - load from config
+    this.load.json(this.currentMapConfig.id, this.currentMapConfig.mapFile);
 
     // Path arrows
     this.loadPathArrows();
 
     // Hero sprites
     Hero.preload(this);
+
+    // Background music and ambient sounds - use config or defaults
+    const audio = this.currentMapConfig.audio;
+    this.load.audio('overworld_music', `audio/${audio?.music ?? 'overworld_music'}.mp3`);
+    this.load.audio('forest_ambience', `audio/${audio?.ambience ?? 'forest_sound_effects'}.mp3`);
+    this.load.audio('horse_walking', 'audio/horse_tracks_v2.mp3');
   }
 
   create(): void {
-    // Load map data
-    this.mapData = this.cache.json.get('tutorial00') as MapData;
+    // Load map data from cache using config ID
+    this.mapData = this.cache.json.get(this.currentMapConfig.id) as MapData;
     if (!this.mapData) {
-      console.error('Failed to load map data');
+      console.error(`Failed to load map data for '${this.currentMapConfig.id}'`);
       return;
     }
 
     // Create systems in order
     this.createTilemap();
-    this.createTownFlag();
     this.createHero();
     this.createFogOfWar();
     this.createMinimap();
@@ -125,10 +167,99 @@ export class OverworldScene extends Phaser.Scene {
     // Initial state
     this.centerViewportOnHero();
     this.updateFogAndMinimap();
+
+    // Start background music
+    this.startOverworldMusic();
   }
 
   update(): void {
     this.minimap?.render(this.fog);
+    // Continuously smooth camera toward target position
+    this.updateCameraPosition(false);
+  }
+
+  // ===========================================================================
+  // MUSIC
+  // ===========================================================================
+
+  private startOverworldMusic(): void {
+    if (this.overworldMusic) return; // Already playing
+
+    this.overworldMusic = this.sound.add('overworld_music', {
+      loop: true,
+      volume: 0.4,
+    });
+    this.overworldMusic.play();
+
+    this.ambientSounds = this.sound.add('forest_ambience', {
+      loop: true,
+      volume: 0.2,
+    });
+    this.ambientSounds.play();
+
+    // Keep audio playing even when focus changes
+    document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    document.addEventListener('click', this.resumeAudioContext);
+  }
+
+  private handleVisibilityChange = (): void => {
+    if (!document.hidden) {
+      this.resumeAudioContext();
+    }
+  };
+
+  private resumeAudioContext = (): void => {
+    // Resume the audio context if it was suspended
+    if (this.sound.context && this.sound.context.state === 'suspended') {
+      this.sound.context.resume();
+    }
+    // Also resume all sounds
+    this.sound.resumeAll();
+  };
+
+  private stopOverworldMusic(): void {
+    // Clean up event listeners
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    document.removeEventListener('click', this.resumeAudioContext);
+
+    if (this.overworldMusic) {
+      this.overworldMusic.stop();
+      this.overworldMusic.destroy();
+      this.overworldMusic = null;
+    }
+    if (this.ambientSounds) {
+      this.ambientSounds.stop();
+      this.ambientSounds.destroy();
+      this.ambientSounds = null;
+    }
+    this.stopHorseWalking();
+  }
+
+  private startHorseWalking(): void {
+    if (this.horseWalkingSound) return; // Already playing
+
+    // Check if audio loaded successfully
+    if (!this.cache.audio.exists('horse_walking')) {
+      return;
+    }
+
+    try {
+      this.horseWalkingSound = this.sound.add('horse_walking', {
+        loop: true,
+        volume: 0.4,
+      });
+      this.horseWalkingSound.play();
+    } catch (e) {
+      console.warn('Failed to play horse walking sound:', e);
+    }
+  }
+
+  private stopHorseWalking(): void {
+    if (this.horseWalkingSound) {
+      this.horseWalkingSound.stop();
+      this.horseWalkingSound.destroy();
+      this.horseWalkingSound = null;
+    }
   }
 
   // ===========================================================================
@@ -203,40 +334,17 @@ export class OverworldScene extends Phaser.Scene {
   }
 
   // ===========================================================================
-  // TOWN FLAG
-  // ===========================================================================
-
-  private createTownFlag(): void {
-    const tileW = OVERWORLD_TILESET.tileWidth;
-    const tileH = OVERWORLD_TILESET.tileHeight;
-    const flagX = PLAYER_TOWN.X * tileW + tileW / 2;
-    const flagY = PLAYER_TOWN.Y * tileH - 4;
-
-    this.townFlag = this.add.graphics();
-    this.townFlag.setDepth(8);
-
-    // Pole
-    this.townFlag.lineStyle(2, 0x4a3728, 1);
-    this.townFlag.lineBetween(flagX, flagY, flagX, flagY - 12);
-
-    // Flag (red triangle)
-    this.townFlag.fillStyle(0xe94560, 1);
-    this.townFlag.fillTriangle(flagX, flagY - 12, flagX + 8, flagY - 9, flagX, flagY - 6);
-
-    // Border
-    this.townFlag.lineStyle(1, 0xb8354a, 1);
-    this.townFlag.strokeTriangle(flagX, flagY - 12, flagX + 8, flagY - 9, flagX, flagY - 6);
-  }
-
-  // ===========================================================================
   // HERO
   // ===========================================================================
 
   private createHero(): void {
+    // Get spawn position from config (handles entry points from other maps)
+    const spawnPos = getSpawnPosition(this.currentMapConfig.id, this.initData.entryFrom);
+
     this.hero = new Hero(
       this,
-      HERO_START.X,
-      HERO_START.Y,
+      spawnPos.x,
+      spawnPos.y,
       OVERWORLD_TILESET.tileWidth
     );
   }
@@ -257,7 +365,6 @@ export class OverworldScene extends Phaser.Scene {
 
     // Add vision sources
     this.fog.addVisionSource('hero', this.hero.tileX, this.hero.tileY, VISION.HERO_RADIUS);
-    this.fog.addVisionSource('town', PLAYER_TOWN.X, PLAYER_TOWN.Y, VISION.TOWN_RADIUS);
   }
 
   private updateFogAndMinimap(): void {
@@ -269,7 +376,6 @@ export class OverworldScene extends Phaser.Scene {
     this.minimap?.setHeroPosition(this.hero.tileX, this.hero.tileY);
     this.minimap?.setVisionSources([
       { x: this.hero.tileX, y: this.hero.tileY, radius: VISION.HERO_RADIUS },
-      { x: PLAYER_TOWN.X, y: PLAYER_TOWN.Y, radius: VISION.TOWN_RADIUS },
     ]);
   }
 
@@ -282,19 +388,12 @@ export class OverworldScene extends Phaser.Scene {
 
     this.minimap = new Minimap('minimap-canvas', this.mapData, MINIMAP_SCALE);
 
-    // Add town marker
-    this.minimap.addMarker({
-      id: 'player-town',
-      x: PLAYER_TOWN.X,
-      y: PLAYER_TOWN.Y,
-      color: `#${MINIMAP_COLORS.PLAYER_TOWN.toString(16)}`,
-      shape: 'square',
-      size: MINIMAP_SCALE + 2,
-      borderColor: '#fff',
-    });
+    // Add markers from map config
+    this.addMinimapMarkersFromConfig();
 
     // Minimap click navigation
     this.minimap.onClick((tileX, tileY) => {
+      if (this.isInputLocked) return;
       this.viewportX = tileX - Math.floor(VIEWPORT.WIDTH / 2);
       this.viewportY = tileY - Math.floor(VIEWPORT.HEIGHT / 2);
       this.clampViewport();
@@ -305,6 +404,65 @@ export class OverworldScene extends Phaser.Scene {
     // Initial viewport
     this.minimap.setViewport(this.viewportX, this.viewportY, VIEWPORT.WIDTH, VIEWPORT.HEIGHT);
     this.minimap.setHeroPosition(this.hero.tileX, this.hero.tileY);
+  }
+
+  /**
+   * Add minimap markers based on map configuration
+   */
+  private addMinimapMarkersFromConfig(): void {
+    // Add player town marker if defined
+    if (this.currentMapConfig.spawn.playerTown) {
+      this.minimap.addMarker({
+        id: 'player-town',
+        x: this.currentMapConfig.spawn.playerTown.x,
+        y: this.currentMapConfig.spawn.playerTown.y,
+        color: `#${MINIMAP_COLORS.PLAYER_TOWN.toString(16)}`,
+        shape: 'square',
+        size: MINIMAP_SCALE + 2,
+        borderColor: '#fff',
+      });
+    }
+
+    // Add markers for locations
+    for (const location of this.currentMapConfig.locations) {
+      // Skip player home (already added above)
+      if (location.type === 'town') {
+        const townConfig = location.config as TownConfig;
+        if (townConfig.isPlayerHome) continue;
+      }
+
+      // Use first entrance tile for marker position
+      const pos = location.entranceTiles[0];
+      if (!pos) continue;
+
+      // Determine marker style based on location type
+      let color = '#888888';
+      let shape: 'circle' | 'square' | 'diamond' = 'circle';
+
+      switch (location.type) {
+        case 'town':
+          color = '#aa8855'; // Brown for other towns
+          shape = 'square';
+          break;
+        case 'shrine':
+          color = '#9966ff'; // Purple for shrines
+          shape = 'diamond';
+          break;
+        case 'dungeon':
+          color = '#ff4444'; // Red for dungeons
+          shape = 'circle';
+          break;
+      }
+
+      this.minimap.addMarker({
+        id: `location-${location.id}`,
+        x: pos.x,
+        y: pos.y,
+        color,
+        shape,
+        size: MINIMAP_SCALE,
+      });
+    }
   }
 
   // ===========================================================================
@@ -328,11 +486,11 @@ export class OverworldScene extends Phaser.Scene {
     this.cameras.main.setZoom(Math.min(scaleX, scaleY));
   }
 
-  private centerViewportOnHero(): void {
+  private centerViewportOnHero(instant: boolean = true): void {
     this.viewportX = this.hero.tileX - Math.floor(VIEWPORT.WIDTH / 2);
     this.viewportY = this.hero.tileY - Math.floor(VIEWPORT.HEIGHT / 2);
     this.clampViewport();
-    this.updateCameraPosition();
+    this.updateCameraPosition(instant);
   }
 
   private clampViewport(): void {
@@ -341,10 +499,48 @@ export class OverworldScene extends Phaser.Scene {
     this.viewportY = Phaser.Math.Clamp(this.viewportY, 0, Math.max(0, this.mapData.height - VIEWPORT.HEIGHT));
   }
 
-  private updateCameraPosition(): void {
-    const centerX = (this.viewportX + VIEWPORT.WIDTH / 2) * OVERWORLD_TILESET.tileWidth;
-    const centerY = (this.viewportY + VIEWPORT.HEIGHT / 2) * OVERWORLD_TILESET.tileHeight;
-    this.cameras.main.centerOn(centerX, centerY);
+  private updateCameraPosition(instant: boolean = false): void {
+    // Get hero's actual sprite position (includes animation interpolation)
+    const heroSprite = this.hero.getSprite();
+    const heroWorldX = heroSprite.x;
+    const heroWorldY = heroSprite.y - OVERWORLD_TILESET.tileHeight / 2; // Adjust for bottom-center anchor
+
+    // Update target to follow hero's animated position
+    this.cameraTargetX = heroWorldX;
+    this.cameraTargetY = heroWorldY;
+
+    if (instant) {
+      // Snap immediately (used for initial positioning)
+      this.cameras.main.centerOn(this.cameraTargetX, this.cameraTargetY);
+      this.cameraVelocityX = 0;
+      this.cameraVelocityY = 0;
+    } else {
+      // Smooth camera with spring-damper physics for natural easing
+      const currentX = this.cameras.main.scrollX + this.cameras.main.width / 2;
+      const currentY = this.cameras.main.scrollY + this.cameras.main.height / 2;
+
+      // Spring constants - lower = smoother/slower, higher = snappier
+      const stiffness = 0.04;  // How strongly it pulls toward target
+      const damping = 0.75;    // How quickly oscillation dies (0-1, higher = less bounce)
+
+      // Calculate spring force
+      const dx = this.cameraTargetX - currentX;
+      const dy = this.cameraTargetY - currentY;
+
+      // Apply spring physics
+      this.cameraVelocityX += dx * stiffness;
+      this.cameraVelocityY += dy * stiffness;
+
+      // Apply damping
+      this.cameraVelocityX *= damping;
+      this.cameraVelocityY *= damping;
+
+      // Update position
+      const newX = currentX + this.cameraVelocityX;
+      const newY = currentY + this.cameraVelocityY;
+
+      this.cameras.main.centerOn(newX, newY);
+    }
   }
 
   private scrollViewportToHero(): void {
@@ -355,9 +551,10 @@ export class OverworldScene extends Phaser.Scene {
       this.viewportX = targetX;
       this.viewportY = targetY;
       this.clampViewport();
-      this.updateCameraPosition();
       this.minimap?.setViewport(this.viewportX, this.viewportY, VIEWPORT.WIDTH, VIEWPORT.HEIGHT);
     }
+    // Always update camera for smooth lerp (called every frame during movement)
+    this.updateCameraPosition(false);
   }
 
   // ===========================================================================
@@ -373,9 +570,6 @@ export class OverworldScene extends Phaser.Scene {
     });
 
     if (this.input.keyboard) {
-      // Spacebar for test combat
-      this.input.keyboard.on('keydown-SPACE', () => this.startTestCombat());
-
       // D for debug mode
       this.input.keyboard.on('keydown-D', () => this.toggleDebugMode());
 
@@ -389,7 +583,7 @@ export class OverworldScene extends Phaser.Scene {
   // ===========================================================================
 
   private handleMapClick(pointer: Phaser.Input.Pointer): void {
-    if (!this.mapData || this.hero.isMoving) return;
+    if (!this.mapData || this.hero.isMoving || this.isInputLocked) return;
 
     // Convert to tile coordinates
     const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
@@ -449,6 +643,9 @@ export class OverworldScene extends Phaser.Scene {
     const path = [...this.pendingPath];
     this.clearPendingPath();
 
+    // Start horse walking sound
+    this.startHorseWalking();
+
     // Move hero along path
     this.hero.moveAlongPath(
       path,
@@ -456,10 +653,13 @@ export class OverworldScene extends Phaser.Scene {
       () => {
         this.updateFogAndMinimap();
         this.scrollViewportToHero();
+        // Check for tile interaction after each step
+        this.checkTileInteraction(this.hero.tileX, this.hero.tileY);
       },
       // On complete
       () => {
-        // Path complete
+        // Stop horse walking sound
+        this.stopHorseWalking();
       }
     );
   }
@@ -490,6 +690,7 @@ export class OverworldScene extends Phaser.Scene {
         getArrowSpriteKey(dx, dy)
       );
       arrow.setDepth(9);
+      arrow.setScale(0.8);  // 20% smaller
       this.pathSprites.push(arrow);
     }
 
@@ -501,6 +702,7 @@ export class OverworldScene extends Phaser.Scene {
       'marker_x'
     );
     marker.setDepth(9);
+    marker.setScale(0.8);  // 20% smaller
     this.pathSprites.push(marker);
   }
 
@@ -608,6 +810,7 @@ export class OverworldScene extends Phaser.Scene {
 
     try {
       const combatState = await startCombat({ player_units: playerUnits, enemy_units: enemyUnits });
+      this.stopOverworldMusic();
       this.events.emit('start-combat', { combatId: combatState.combat_id });
     } catch (error) {
       console.error('Failed to start combat:', error);
@@ -615,11 +818,82 @@ export class OverworldScene extends Phaser.Scene {
   }
 
   // ===========================================================================
+  // INTERACTIONS
+  // ===========================================================================
+
+  /**
+   * Check if the current tile triggers an interaction
+   */
+  private checkTileInteraction(tileX: number, tileY: number): void {
+    if (!this.mapData) return;
+
+    const terrainLayer = this.mapData.layers.find(l => l.name === 'terrain');
+    const terrainId = terrainLayer?.data[tileY]?.[tileX] ?? 0;
+
+    const interactionType = getInteractionType(terrainId);
+    if (interactionType) {
+      // Lock input while interaction modal is shown
+      this.isInputLocked = true;
+
+      // Get interaction data using the new config-based system
+      const { data, locationId } = getInteractionDataFromConfig(
+        this.currentMapConfig.id,
+        interactionType,
+        tileX,
+        tileY
+      );
+      const id = getInteractionId(interactionType, tileX, tileY);
+
+      // Emit event for React to handle
+      const trigger: InteractionTrigger = {
+        id,
+        type: interactionType,
+        tileX,
+        tileY,
+        mapId: this.currentMapConfig.id,
+        locationId,
+        data,
+      };
+
+      console.log('Interaction triggered:', trigger);
+      this.events.emit('interaction-triggered', trigger);
+    }
+  }
+
+  /**
+   * Get the terrain tile ID at a position
+   */
+  private getTerrainTile(tileX: number, tileY: number): number {
+    const terrainLayer = this.mapData?.layers.find(l => l.name === 'terrain');
+    return terrainLayer?.data[tileY]?.[tileX] ?? 0;
+  }
+
+  // ===========================================================================
   // PUBLIC API
   // ===========================================================================
+
+  /** Lock or unlock input (used by interaction modals) */
+  public setInputLocked(locked: boolean): void {
+    this.isInputLocked = locked;
+  }
 
   /** Called from React to set sidebar width (reserved for future use) */
   public setSidebarWidth(_width: number): void {
     // Reserved for layout adjustments
+  }
+
+  /** Resume audio - call this when modal opens/closes to keep music playing */
+  public resumeAudio(): void {
+    this.resumeAudioContext();
+  }
+
+  /** Get the current map ID */
+  public getCurrentMapId(): string {
+    return this.currentMapConfig.id;
+  }
+
+  /** Get the current map configuration */
+  public getCurrentMapConfig(): MapConfig {
+    return this.currentMapConfig;
   }
 }

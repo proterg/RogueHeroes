@@ -41,15 +41,39 @@ import {
   isInVision,
   getSpriteConfig,
 } from '../data/UnitStats';
+
+/** All unit types for test mode spawning */
+const ALL_UNIT_STATS: UnitStats[] = [
+  SKELETON_WARRIOR,
+  SKELETON_GUARD,
+  VAMPIRE,
+  ORC,
+  SOLDIER,
+  ARCHER,
+  AXEMAN,
+  KNIGHT,
+  LANCER,
+];
 import {
   getOccupiedTiles,
   isTileOccupied,
   canUnitFitAt,
+  canUnitFitAtWithTerrain,
   getUnitWorldX,
   getUnitWorldY,
   getUnitDistance,
+  getUnitMovementPenalty,
+  isTerrainTileWalkable,
+  getTerrainTileMeleeAttackPenalty,
+  hasLineOfSight,
+  hasProjectilePath,
   GridUnit,
 } from '../utils/GridUtils';
+import {
+  BattlefieldData,
+  getTerrainType,
+  createEmptyBattlefield,
+} from '../../types/combatTerrain';
 import {
   preloadUnitSprites,
   createUnitAnimations,
@@ -74,6 +98,19 @@ interface Unit {
   chargeReady: boolean; // Lancer charge attack ready (1.2x damage, no delay)
 }
 
+/** Deployment phase configuration */
+interface DeploymentPhaseConfig {
+  turn: number;      // Turn number when this phase triggers (0 = start)
+  maxUnits: number;  // Maximum units to deploy this phase
+}
+
+/** Deployment phases for Skirmish mode */
+const DEPLOYMENT_PHASES: DeploymentPhaseConfig[] = [
+  { turn: 0, maxUnits: 3 },
+  { turn: 10, maxUnits: 4 },
+  { turn: 18, maxUnits: 2 },
+];
+
 export class CombatScene extends Phaser.Scene {
   private units: Unit[] = [];
   private gridWidth = 16;
@@ -88,16 +125,70 @@ export class CombatScene extends Phaser.Scene {
   private fogGraphics!: Phaser.GameObjects.Graphics;
   private fogState: number[][] = []; // 0 = full fog, 1 = fully visible, 0-1 = partial
 
+  // Terrain system
+  private terrainData: string[][] | null = null; // 2D grid of terrain IDs
+  private terrainGraphics!: Phaser.GameObjects.Graphics;
+
+  // Deployment state for Skirmish mode
+  private isDeploying = true;
+  private deploymentPhase = 0; // Index into DEPLOYMENT_PHASES (0, 1, 2)
+  private unitsDeployedThisPhase = 0;
+  private selectedUnitType: string = 'soldier';
+  private availableUnits: Map<string, number> = new Map(); // type -> remaining count
+  private enemyAvailableUnits: Map<string, number> = new Map();
+  private deploymentHighlightGraphics!: Phaser.GameObjects.Graphics;
+  private hoveredTile: { x: number; y: number } | null = null;
+  private placementPreview: Phaser.GameObjects.Sprite | null = null;
+  private unitIdCounter = 0;
+
+  // Test mode: spawns one of each unit on both sides
+  private testMode = false;
+
   constructor() {
     super({ key: 'CombatScene' });
   }
 
-  init(): void {
+  init(data?: { battlefield?: BattlefieldData; testMode?: boolean }): void {
     // Reset all state on scene start/restart
     this.units = [];
     this.fogState = [];
     this.combatStarted = false;
     this.turnNumber = 0;
+
+    // Check for test mode (from init data or URL parameter)
+    const urlParams = new URLSearchParams(window.location.search);
+    this.testMode = data?.testMode || urlParams.get('test') === 'true';
+
+    // Load battlefield data (terrain and dimensions)
+    if (data?.battlefield) {
+      this.terrainData = data.battlefield.terrain;
+      this.gridWidth = data.battlefield.width;
+      this.gridHeight = data.battlefield.height;
+    } else {
+      this.terrainData = null;
+      this.gridWidth = 16;
+      this.gridHeight = 9;
+    }
+
+    // Reset deployment state
+    this.isDeploying = !this.testMode; // Skip deployment in test mode
+    this.deploymentPhase = 0;
+    this.unitsDeployedThisPhase = 0;
+    this.selectedUnitType = 'soldier';
+    this.unitIdCounter = 0;
+    this.hoveredTile = null;
+
+    // Initialize available units for both sides (10 soldiers, 10 archers, 1 lancer)
+    this.availableUnits = new Map([
+      ['soldier', 10],
+      ['archer', 10],
+      ['lancer', 1],
+    ]);
+    this.enemyAvailableUnits = new Map([
+      ['soldier', 10],
+      ['archer', 10],
+      ['lancer', 1],
+    ]);
 
     // Clear any lingering tweens/timers from previous run
     this.tweens?.killAll();
@@ -124,8 +215,16 @@ export class CombatScene extends Phaser.Scene {
     // Initialize fog state (player sees left half by default)
     this.initFogState();
 
-    // Create the battlefield grid
+    // Create terrain graphics layer (below everything)
+    this.terrainGraphics = this.add.graphics();
+    this.terrainGraphics.setDepth(0);
+
+    // Create the battlefield grid (includes terrain rendering)
     this.createBattlefield();
+
+    // Create deployment highlight graphics (below fog)
+    this.deploymentHighlightGraphics = this.add.graphics();
+    this.deploymentHighlightGraphics.setDepth(5);
 
     // Create fog of war overlay (rendered on top)
     this.fogGraphics = this.add.graphics();
@@ -134,42 +233,64 @@ export class CombatScene extends Phaser.Scene {
     // Create animations via AnimationSystem
     createUnitAnimations(this);
 
-    // Spawn units
-    this.spawnUnits();
+    // Initialize empty unit array for Skirmish mode (no auto-spawn)
+    this.units = [];
 
-    // Initial fog update based on unit positions
+    // Initial fog update
     this.updateFogOfWar();
 
-    // Start auto-combat after a short delay
-    this.time.delayedCall(2000, () => {
-      this.combatStarted = true;
-      this.runCombatLoop();
-    });
+    // Set up deployment input handlers
+    this.setupDeploymentInput();
 
-    // Add title text
-    this.add.text(this.cameras.main.width / 2, 20, 'AUTOBATTLER TEST', {
-      fontSize: '24px',
-      color: '#ffffff',
-      fontFamily: 'monospace',
-    }).setOrigin(0.5);
+    // Set up event listeners for React communication
+    this.setupEventListeners();
 
-    // Log stats to console
-    console.log(formatStats(SKELETON_WARRIOR));
-    console.log(formatStats(SKELETON_GUARD));
+    // Test mode: spawn all units and start combat immediately
+    if (this.testMode) {
+      this.spawnTestUnits();
+      this.updateFogOfWar();
+      // Add title text for test mode
+      this.add.text(this.cameras.main.width / 2, 20, 'TEST BATTLE - All Units', {
+        fontSize: '24px',
+        color: '#ffff00',
+        fontFamily: 'monospace',
+      }).setOrigin(0.5);
+      // Start combat after short delay
+      this.time.delayedCall(500, () => {
+        this.combatStarted = true;
+        this.runCombatLoop();
+      });
+    } else {
+      // Start first deployment phase
+      this.startDeploymentPhase(0);
+
+      // Add title text
+      this.add.text(this.cameras.main.width / 2, 20, 'SKIRMISH BATTLE', {
+        fontSize: '24px',
+        color: '#ffffff',
+        fontFamily: 'monospace',
+      }).setOrigin(0.5);
+    }
   }
 
   private createBattlefield(): void {
     const scaledTileSize = this.tileSize * this.pixelScale;
     const graphics = this.add.graphics();
+    graphics.setDepth(1);
 
     for (let y = 0; y < this.gridHeight; y++) {
       for (let x = 0; x < this.gridWidth; x++) {
         const worldX = this.gridOffsetX + x * scaledTileSize;
         const worldY = this.gridOffsetY + y * scaledTileSize;
 
-        // Draw floor tile
-        graphics.fillStyle(0x3d2845, 1);
-        graphics.fillRect(worldX, worldY, scaledTileSize, scaledTileSize);
+        // Draw terrain if available, otherwise default floor
+        if (this.terrainData) {
+          this.drawTerrainTile(x, y, worldX, worldY, scaledTileSize);
+        } else {
+          // Default floor tile
+          graphics.fillStyle(0x3d2845, 1);
+          graphics.fillRect(worldX, worldY, scaledTileSize, scaledTileSize);
+        }
 
         // Draw grid lines
         graphics.lineStyle(1, 0x5c3d5e, 0.5);
@@ -186,6 +307,627 @@ export class CombatScene extends Phaser.Scene {
       centerX,
       this.gridOffsetY + this.gridHeight * scaledTileSize
     );
+  }
+
+  /** Draw a single terrain tile with visual effects */
+  private drawTerrainTile(
+    tileX: number,
+    tileY: number,
+    worldX: number,
+    worldY: number,
+    tileSize: number
+  ): void {
+    if (!this.terrainData) return;
+
+    const terrainId = this.terrainData[tileY]?.[tileX] ?? 'ground';
+    const terrain = getTerrainType(terrainId);
+
+    // Draw base terrain color
+    this.terrainGraphics.fillStyle(terrain.color, 1);
+    this.terrainGraphics.fillRect(worldX, worldY, tileSize, tileSize);
+
+    // Add visual texture based on terrain type
+    const cx = worldX + tileSize / 2;
+    const cy = worldY + tileSize / 2;
+
+    switch (terrain.id) {
+      case 'rock':
+      case 'boulder':
+        // Draw rock shape
+        this.terrainGraphics.fillStyle(0x333333, 0.6);
+        this.terrainGraphics.fillCircle(cx, cy, tileSize * 0.35);
+        break;
+
+      case 'tree':
+        // Draw tree trunk and foliage
+        this.terrainGraphics.fillStyle(0x4a3728, 1);
+        this.terrainGraphics.fillRect(cx - 2, cy, 4, tileSize * 0.4);
+        this.terrainGraphics.fillStyle(0x1a4a1a, 1);
+        this.terrainGraphics.fillCircle(cx, cy - 4, tileSize * 0.35);
+        break;
+
+      case 'bush':
+        // Draw bush circles with cover indicator
+        this.terrainGraphics.fillStyle(0x2d7a2d, 0.7);
+        this.terrainGraphics.fillCircle(cx - 4, cy, 6);
+        this.terrainGraphics.fillCircle(cx + 4, cy, 6);
+        this.terrainGraphics.fillCircle(cx, cy - 3, 6);
+        break;
+
+      case 'water_shallow':
+      case 'water_deep':
+        // Draw wave lines
+        this.terrainGraphics.lineStyle(1, 0xffffff, 0.3);
+        this.terrainGraphics.lineBetween(worldX + 4, cy - 3, worldX + tileSize - 4, cy - 3);
+        this.terrainGraphics.lineBetween(worldX + 6, cy + 3, worldX + tileSize - 6, cy + 3);
+        break;
+
+      case 'wall':
+        // Draw brick pattern
+        this.terrainGraphics.lineStyle(1, 0x5a4a3a, 0.6);
+        this.terrainGraphics.strokeRect(worldX + 2, worldY + 2, tileSize - 4, tileSize / 2 - 2);
+        this.terrainGraphics.strokeRect(worldX + tileSize / 4, worldY + tileSize / 2 + 1,
+          tileSize / 2, tileSize / 2 - 3);
+        break;
+
+      case 'mud':
+        // Draw mud spots
+        this.terrainGraphics.fillStyle(0x4a3a2a, 0.5);
+        this.terrainGraphics.fillCircle(cx - 5, cy - 3, 4);
+        this.terrainGraphics.fillCircle(cx + 4, cy + 2, 5);
+        break;
+    }
+  }
+
+  /** Load a battlefield with terrain data */
+  public loadBattlefield(data: BattlefieldData): void {
+    this.terrainData = data.terrain;
+    this.gridWidth = data.width;
+    this.gridHeight = data.height;
+
+    // Recalculate grid offset
+    const scaledTileSize = this.tileSize * this.pixelScale;
+    this.gridOffsetX = (this.cameras.main.width - this.gridWidth * scaledTileSize) / 2;
+    this.gridOffsetY = (this.cameras.main.height - this.gridHeight * scaledTileSize) / 2;
+
+    // Re-render terrain
+    this.terrainGraphics.clear();
+    this.createBattlefield();
+    this.initFogState();
+    this.updateFogOfWar();
+  }
+
+  // ==================== DEPLOYMENT SYSTEM ====================
+
+  /** Set up input handlers for deployment */
+  private setupDeploymentInput(): void {
+    const scaledTileSize = this.tileSize * this.pixelScale;
+
+    // Track mouse movement for hover highlights
+    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      if (!this.isDeploying) {
+        this.hoveredTile = null;
+        this.updateDeploymentHighlights();
+        return;
+      }
+
+      // Convert pointer to grid coordinates
+      const tileX = Math.floor((pointer.x - this.gridOffsetX) / scaledTileSize);
+      const tileY = Math.floor((pointer.y - this.gridOffsetY) / scaledTileSize);
+
+      // Check if within grid bounds
+      if (tileX >= 0 && tileX < this.gridWidth && tileY >= 0 && tileY < this.gridHeight) {
+        this.hoveredTile = { x: tileX, y: tileY };
+      } else {
+        this.hoveredTile = null;
+      }
+
+      this.updateDeploymentHighlights();
+    });
+
+    // Handle click to deploy or remove unit
+    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (!this.isDeploying) return;
+
+      const tileX = Math.floor((pointer.x - this.gridOffsetX) / scaledTileSize);
+      const tileY = Math.floor((pointer.y - this.gridOffsetY) / scaledTileSize);
+
+      // Check if clicking on an existing player unit to remove it
+      const unitAtTile = this.getPlayerUnitAtTile(tileX, tileY);
+      if (unitAtTile) {
+        this.removeDeployedUnit(unitAtTile);
+        return;
+      }
+
+      if (this.canDeployAt(tileX, tileY)) {
+        this.deployUnit(this.selectedUnitType, tileX, tileY, true);
+      }
+    });
+  }
+
+  /** Set up event listeners for React communication */
+  private setupEventListeners(): void {
+    // React can emit these events to control deployment
+    this.events.on('select-unit-type', (unitType: string) => {
+      this.selectedUnitType = unitType;
+      this.updateDeploymentHighlights();
+      this.emitDeploymentState();
+    });
+
+    this.events.on('confirm-deployment', () => {
+      this.confirmDeployment();
+    });
+  }
+
+  /** Emit current deployment state to React */
+  private emitDeploymentState(): void {
+    const phaseConfig = DEPLOYMENT_PHASES[this.deploymentPhase];
+    this.events.emit('deployment-state', {
+      isDeploying: this.isDeploying,
+      phase: this.deploymentPhase + 1, // 1-indexed for display
+      maxUnits: phaseConfig?.maxUnits ?? 0,
+      unitsDeployed: this.unitsDeployedThisPhase,
+      selectedUnitType: this.selectedUnitType,
+      availableUnits: Object.fromEntries(this.availableUnits),
+    });
+  }
+
+  /** Start a deployment phase */
+  private startDeploymentPhase(phaseIndex: number): void {
+    if (phaseIndex >= DEPLOYMENT_PHASES.length) return;
+
+    this.deploymentPhase = phaseIndex;
+    this.isDeploying = true;
+    this.unitsDeployedThisPhase = 0;
+    this.combatStarted = false;
+
+    // Emit state to React
+    this.emitDeploymentState();
+    this.updateDeploymentHighlights();
+
+    console.log(`Starting deployment phase ${phaseIndex + 1}`);
+  }
+
+  /** Check if player can deploy at a specific tile */
+  private canDeployAt(tileX: number, tileY: number): boolean {
+    // Must be in deployment mode
+    if (!this.isDeploying) return false;
+
+    // Check phase limits
+    const phaseConfig = DEPLOYMENT_PHASES[this.deploymentPhase];
+    if (this.unitsDeployedThisPhase >= phaseConfig.maxUnits) return false;
+
+    // Check if we have units of the selected type available
+    const remaining = this.availableUnits.get(this.selectedUnitType) ?? 0;
+    if (remaining <= 0) return false;
+
+    // Player can only deploy in columns 0-1
+    if (tileX < 0 || tileX > 1) return false;
+
+    // Check grid bounds
+    if (tileY < 0 || tileY >= this.gridHeight) return false;
+
+    // For multi-tile units (lancer), check if all tiles fit
+    const unitStats = this.getUnitStatsByType(this.selectedUnitType);
+    const unitSize = unitStats.size || 1;
+    for (let i = 0; i < unitSize; i++) {
+      if (tileX + i > 1) return false; // Multi-tile unit must fit in columns 0-1
+      if (isTileOccupied(tileX + i, tileY, this.units)) return false;
+      // Check terrain walkability
+      if (!isTerrainTileWalkable(tileX + i, tileY, this.terrainData)) return false;
+    }
+
+    return true;
+  }
+
+  /** Get unit stats by type string */
+  private getUnitStatsByType(type: string): UnitStats {
+    switch (type) {
+      case 'soldier': return SOLDIER;
+      case 'archer': return ARCHER;
+      case 'lancer': return LANCER;
+      default: return SOLDIER;
+    }
+  }
+
+  /** Deploy a unit at a specific position */
+  private deployUnit(unitType: string, gridX: number, gridY: number, isPlayer: boolean): void {
+    const unitStats = this.getUnitStatsByType(unitType);
+    const scaledTileSize = this.tileSize * this.pixelScale;
+    const unitSize = unitStats.size || 1;
+
+    const animPrefix = unitStats.type;
+    const spriteScale = getSpriteConfig(unitStats.type).scale;
+    const originY = getSpriteConfig(unitStats.type).originY;
+
+    // Center sprite across all tiles the unit occupies
+    const spriteX = this.gridOffsetX + (gridX + unitSize / 2) * scaledTileSize;
+    const spriteY = this.gridOffsetY + gridY * scaledTileSize + scaledTileSize / 2;
+
+    const sprite = this.add.sprite(spriteX, spriteY, `${animPrefix}_idle`);
+    sprite.setOrigin(0.5, originY);
+    sprite.setScale(spriteScale);
+    sprite.setDepth(10 + gridY);
+    sprite.play(`${animPrefix}_idle_anim`);
+
+    // Enemy units face left
+    if (!isPlayer) {
+      sprite.setFlipX(true);
+    }
+
+    const unit: Unit = {
+      id: `${isPlayer ? 'player' : 'enemy'}${++this.unitIdCounter}`,
+      sprite,
+      stats: unitStats,
+      currentHp: unitStats.hp,
+      gridX,
+      gridY,
+      isPlayer,
+      state: 'moving',
+      setCounter: 0,
+      target: null,
+      chargeReady: true,
+    };
+
+    this.units.push(unit);
+    this.updateHealthTint(unit);
+
+    // Update available units count
+    if (isPlayer) {
+      const remaining = (this.availableUnits.get(unitType) ?? 0) - 1;
+      this.availableUnits.set(unitType, remaining);
+      this.unitsDeployedThisPhase++;
+
+      // Emit updated state
+      this.emitDeploymentState();
+      this.events.emit('unit-deployed', {
+        unitType,
+        remaining,
+        unitsDeployed: this.unitsDeployedThisPhase,
+      });
+    } else {
+      const remaining = (this.enemyAvailableUnits.get(unitType) ?? 0) - 1;
+      this.enemyAvailableUnits.set(unitType, remaining);
+    }
+
+    // Update fog of war
+    this.updateFogOfWar();
+    this.updateDeploymentHighlights();
+  }
+
+  /** Get player unit at a specific tile (checks all tiles occupied by multi-tile units) */
+  private getPlayerUnitAtTile(tileX: number, tileY: number): Unit | null {
+    for (const unit of this.units) {
+      if (!unit.isPlayer || unit.currentHp <= 0) continue;
+      const occupied = getOccupiedTiles(unit);
+      if (occupied.some(t => t.x === tileX && t.y === tileY)) {
+        return unit;
+      }
+    }
+    return null;
+  }
+
+  /** Remove a deployed unit and refund it to available pool */
+  private removeDeployedUnit(unit: Unit): void {
+    // Destroy the sprite
+    unit.sprite.destroy();
+
+    // Remove from units array
+    const index = this.units.indexOf(unit);
+    if (index > -1) {
+      this.units.splice(index, 1);
+    }
+
+    // Refund to available units
+    const unitType = unit.stats.type;
+    const current = this.availableUnits.get(unitType) ?? 0;
+    this.availableUnits.set(unitType, current + 1);
+
+    // Decrement deployed count
+    this.unitsDeployedThisPhase--;
+
+    // Emit updated state
+    this.emitDeploymentState();
+    this.events.emit('unit-removed', {
+      unitType,
+      remaining: current + 1,
+      unitsDeployed: this.unitsDeployedThisPhase,
+    });
+
+    // Update visuals
+    this.updateFogOfWar();
+    this.updateDeploymentHighlights();
+  }
+
+  /** Confirm deployment and proceed */
+  private confirmDeployment(): void {
+    if (!this.isDeploying) return;
+
+    // Enemy deploys their units
+    this.enemyDeploy();
+
+    // End deployment phase
+    this.isDeploying = false;
+    this.hoveredTile = null;
+    this.updateDeploymentHighlights();
+
+    // Update fog after all units placed
+    this.updateFogOfWar();
+
+    // Emit state change
+    this.emitDeploymentState();
+
+    // Start or resume combat
+    if (this.deploymentPhase === 0) {
+      // First phase - start combat after delay
+      this.time.delayedCall(1000, () => {
+        this.combatStarted = true;
+        this.runCombatLoop();
+      });
+    } else {
+      // Subsequent phases - resume combat immediately
+      this.combatStarted = true;
+      this.time.delayedCall(500, () => {
+        this.runCombatLoop();
+      });
+    }
+  }
+
+  /** AI enemy deployment */
+  private enemyDeploy(): void {
+    const phaseConfig = DEPLOYMENT_PHASES[this.deploymentPhase];
+    const maxToDeploy = phaseConfig.maxUnits;
+    let deployed = 0;
+
+    // Get available unit types with remaining counts
+    const availableTypes = Array.from(this.enemyAvailableUnits.entries())
+      .filter(([_, count]) => count > 0)
+      .map(([type, _]) => type);
+
+    if (availableTypes.length === 0) return;
+
+    // Try to spread units across rows
+    const usedRows = new Set<number>();
+
+    while (deployed < maxToDeploy && availableTypes.length > 0) {
+      // Pick random unit type
+      const typeIdx = Math.floor(Math.random() * availableTypes.length);
+      const unitType = availableTypes[typeIdx];
+      const unitStats = this.getUnitStatsByType(unitType);
+      const unitSize = unitStats.size || 1;
+
+      // Find empty position in columns 14-15 (enemy side)
+      let placed = false;
+
+      // Prefer rows not yet used for spreading
+      const rows = Array.from({ length: this.gridHeight }, (_, i) => i);
+      rows.sort((a, b) => {
+        const aUsed = usedRows.has(a) ? 1 : 0;
+        const bUsed = usedRows.has(b) ? 1 : 0;
+        if (aUsed !== bUsed) return aUsed - bUsed;
+        return Math.random() - 0.5;
+      });
+
+      for (const row of rows) {
+        // Try column 15 first for size-1 units, column 14 for size-2
+        const cols = unitSize === 1 ? [15, 14] : [14];
+        for (const col of cols) {
+          // Check if all tiles are free
+          let canPlace = true;
+          for (let i = 0; i < unitSize; i++) {
+            if (col + i > 15 || isTileOccupied(col + i, row, this.units)) {
+              canPlace = false;
+              break;
+            }
+          }
+
+          if (canPlace) {
+            this.deployUnit(unitType, col, row, false);
+            usedRows.add(row);
+            deployed++;
+            placed = true;
+            break;
+          }
+        }
+        if (placed) break;
+      }
+
+      // If couldn't place this type, remove from available
+      if (!placed) {
+        availableTypes.splice(typeIdx, 1);
+      }
+
+      // Check if this type is now exhausted
+      const remaining = this.enemyAvailableUnits.get(unitType) ?? 0;
+      if (remaining <= 0) {
+        const idx = availableTypes.indexOf(unitType);
+        if (idx >= 0) availableTypes.splice(idx, 1);
+      }
+    }
+  }
+
+  /** Spawn one of each unit on both sides for testing */
+  private spawnTestUnits(): void {
+    const scaledTileSize = this.tileSize * this.pixelScale;
+
+    // Spawn one of each unit type on each side
+    // Player units on left (columns 0-1), enemy units on right (columns 14-15)
+    let playerRow = 0;
+    let enemyRow = 0;
+
+    for (const unitStats of ALL_UNIT_STATS) {
+      const unitSize = unitStats.size || 1;
+
+      // Spawn player unit
+      if (playerRow < this.gridHeight) {
+        const playerX = unitSize === 2 ? 0 : 1; // Lancer at column 0, others at column 1
+        this.spawnTestUnit(unitStats, playerX, playerRow, true);
+        playerRow++;
+      }
+
+      // Spawn enemy unit
+      if (enemyRow < this.gridHeight) {
+        const enemyX = unitSize === 2 ? 14 : 14; // All enemies at column 14
+        this.spawnTestUnit(unitStats, enemyX, enemyRow, false);
+        enemyRow++;
+      }
+    }
+
+    console.log(`Test mode: Spawned ${this.units.length} units (${ALL_UNIT_STATS.length} per side)`);
+  }
+
+  /** Spawn a single unit for test mode */
+  private spawnTestUnit(unitStats: UnitStats, gridX: number, gridY: number, isPlayer: boolean): void {
+    const scaledTileSize = this.tileSize * this.pixelScale;
+    const unitSize = unitStats.size || 1;
+
+    const animPrefix = unitStats.type;
+    const spriteScale = getSpriteConfig(unitStats.type).scale;
+    const originY = getSpriteConfig(unitStats.type).originY;
+
+    // Center sprite across all tiles the unit occupies
+    const spriteX = this.gridOffsetX + (gridX + unitSize / 2) * scaledTileSize;
+    const spriteY = this.gridOffsetY + gridY * scaledTileSize + scaledTileSize / 2;
+
+    const sprite = this.add.sprite(spriteX, spriteY, `${animPrefix}_idle`);
+    sprite.setOrigin(0.5, originY);
+    sprite.setScale(spriteScale);
+    sprite.setDepth(10 + gridY);
+    sprite.play(`${animPrefix}_idle_anim`);
+
+    // Enemy units face left
+    if (!isPlayer) {
+      sprite.setFlipX(true);
+    }
+
+    const unit: Unit = {
+      id: `${isPlayer ? 'player' : 'enemy'}${++this.unitIdCounter}`,
+      sprite,
+      stats: unitStats,
+      currentHp: unitStats.hp,
+      gridX,
+      gridY,
+      isPlayer,
+      state: 'moving',
+      setCounter: 0,
+      target: null,
+      chargeReady: true,
+    };
+
+    this.units.push(unit);
+    this.updateHealthTint(unit);
+  }
+
+  /** Update visual highlights during deployment */
+  private updateDeploymentHighlights(): void {
+    this.deploymentHighlightGraphics.clear();
+
+    // Hide placement preview by default
+    if (this.placementPreview) {
+      this.placementPreview.setVisible(false);
+    }
+
+    // Reset cursor to default
+    this.input.setDefaultCursor('default');
+
+    if (!this.isDeploying) return;
+
+    const scaledTileSize = this.tileSize * this.pixelScale;
+    const phaseConfig = DEPLOYMENT_PHASES[this.deploymentPhase];
+    const canDeployMore = this.unitsDeployedThisPhase < phaseConfig.maxUnits;
+    const hasUnits = (this.availableUnits.get(this.selectedUnitType) ?? 0) > 0;
+
+    // Check if hovering over a deployed player unit
+    let hoveredUnit: Unit | null = null;
+    if (this.hoveredTile) {
+      hoveredUnit = this.getPlayerUnitAtTile(this.hoveredTile.x, this.hoveredTile.y);
+    }
+
+    // Change cursor to indicate removal when hovering over a deployed unit
+    if (hoveredUnit) {
+      // Use a custom cursor or the 'not-allowed' style to indicate removal
+      this.input.setDefaultCursor('url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'32\' height=\'32\' viewBox=\'0 0 32 32\'%3E%3Ctext x=\'0\' y=\'24\' font-size=\'24\'%3E❌%3C/text%3E%3C/svg%3E") 16 16, pointer');
+    }
+
+    // Show placement preview if hovering over a valid deployment tile
+    if (this.hoveredTile && !hoveredUnit && canDeployMore && hasUnits) {
+      const canDeploy = this.canDeployAt(this.hoveredTile.x, this.hoveredTile.y);
+      if (canDeploy) {
+        this.showPlacementPreview(this.hoveredTile.x, this.hoveredTile.y);
+      }
+    }
+
+    // Highlight valid deployment columns (0-1)
+    for (let y = 0; y < this.gridHeight; y++) {
+      for (let x = 0; x <= 1; x++) {
+        const worldX = this.gridOffsetX + x * scaledTileSize;
+        const worldY = this.gridOffsetY + y * scaledTileSize;
+
+        const isOccupied = isTileOccupied(x, y, this.units);
+        const isHovered = this.hoveredTile?.x === x && this.hoveredTile?.y === y;
+        const isHoveredUnit = hoveredUnit && this.getPlayerUnitAtTile(x, y) === hoveredUnit;
+
+        if (isHoveredUnit) {
+          // Hovering over deployed unit - red highlight to show removal
+          this.deploymentHighlightGraphics.fillStyle(0xff0000, 0.3);
+        } else if (isOccupied) {
+          // Occupied tile - subtle gray
+          this.deploymentHighlightGraphics.fillStyle(0x666666, 0.2);
+        } else if (isHovered && canDeployMore && hasUnits) {
+          // Hovered valid tile - bright green
+          this.deploymentHighlightGraphics.fillStyle(0x00ff00, 0.4);
+        } else if (canDeployMore && hasUnits) {
+          // Valid but not hovered - subtle green
+          this.deploymentHighlightGraphics.fillStyle(0x00ff00, 0.15);
+        } else {
+          // Can't deploy more - subtle red
+          this.deploymentHighlightGraphics.fillStyle(0xff0000, 0.1);
+        }
+
+        this.deploymentHighlightGraphics.fillRect(worldX, worldY, scaledTileSize, scaledTileSize);
+      }
+    }
+
+    // For lancer (size 2), show extended highlight
+    if (this.hoveredTile && this.selectedUnitType === 'lancer' && canDeployMore && hasUnits) {
+      const x = this.hoveredTile.x;
+      const y = this.hoveredTile.y;
+      if (x <= 0 && !isTileOccupied(x + 1, y, this.units)) {
+        const worldX = this.gridOffsetX + (x + 1) * scaledTileSize;
+        const worldY = this.gridOffsetY + y * scaledTileSize;
+        this.deploymentHighlightGraphics.fillStyle(0x00ff00, 0.3);
+        this.deploymentHighlightGraphics.fillRect(worldX, worldY, scaledTileSize, scaledTileSize);
+      }
+    }
+  }
+
+  /** Show a ghost/preview of the unit at the hovered position */
+  private showPlacementPreview(tileX: number, tileY: number): void {
+    const unitStats = this.getUnitStatsByType(this.selectedUnitType);
+    const unitSize = unitStats.size || 1;
+    const scaledTileSize = this.tileSize * this.pixelScale;
+    const spriteConfig = getSpriteConfig(unitStats.type);
+
+    // Calculate position (centered for multi-tile units)
+    const spriteX = this.gridOffsetX + (tileX + unitSize / 2) * scaledTileSize;
+    const spriteY = this.gridOffsetY + tileY * scaledTileSize + scaledTileSize / 2;
+
+    const textureKey = `${unitStats.type}_idle`;
+
+    // Create or update the preview sprite
+    if (!this.placementPreview) {
+      this.placementPreview = this.add.sprite(spriteX, spriteY, textureKey);
+      this.placementPreview.setDepth(15);
+    } else {
+      this.placementPreview.setTexture(textureKey);
+      this.placementPreview.setPosition(spriteX, spriteY);
+    }
+
+    this.placementPreview.setOrigin(0.5, spriteConfig.originY);
+    this.placementPreview.setScale(spriteConfig.scale);
+    this.placementPreview.setAlpha(0.4);
+    this.placementPreview.setVisible(true);
+    this.placementPreview.play(`${unitStats.type}_idle_anim`);
   }
 
   private initFogState(): void {
@@ -220,12 +962,17 @@ export class CombatScene extends Phaser.Scene {
           const distance = Math.sqrt(dx * dx + dy * dy);
 
           if (distance <= vision) {
-            // Fully visible
-            this.fogState[y][x] = 1;
+            // Check line of sight (terrain may block vision)
+            if (hasLineOfSight(unit.gridX, unit.gridY, x, y, this.terrainData)) {
+              // Fully visible
+              this.fogState[y][x] = 1;
+            }
           } else if (distance <= vision + 1.5) {
-            // Partial visibility at edge (gradient)
-            const edgeFactor = 1 - (distance - vision) / 1.5;
-            this.fogState[y][x] = Math.max(this.fogState[y][x], edgeFactor);
+            // Partial visibility at edge (gradient) - still check LOS
+            if (hasLineOfSight(unit.gridX, unit.gridY, x, y, this.terrainData)) {
+              const edgeFactor = 1 - (distance - vision) / 1.5;
+              this.fogState[y][x] = Math.max(this.fogState[y][x], edgeFactor);
+            }
           }
         }
       }
@@ -279,129 +1026,12 @@ export class CombatScene extends Phaser.Scene {
     const dx = target.gridX - viewer.gridX;
     const dy = target.gridY - viewer.gridY;
     const distance = Math.sqrt(dx * dx + dy * dy);
-    return distance <= viewer.stats.vision + 1.5; // Include partial vision range
-  }
 
-  private spawnUnits(): void {
-    const scaledTileSize = this.tileSize * this.pixelScale;
-    const occupiedTiles = new Set<string>();
+    // Must be within vision range
+    if (distance > viewer.stats.vision + 1.5) return false;
 
-    const getRandomPosition = (minX: number, maxX: number): { x: number; y: number } => {
-      let x: number, y: number;
-      let attempts = 0;
-      do {
-        x = minX + Math.floor(Math.random() * (maxX - minX));
-        y = Math.floor(Math.random() * this.gridHeight);
-        attempts++;
-      } while (occupiedTiles.has(`${x},${y}`) && attempts < 100);
-      occupiedTiles.add(`${x},${y}`);
-      return { x, y };
-    };
-
-    // TEST: All units battle
-    const playerUnitTypes = [SKELETON_WARRIOR, SKELETON_GUARD, ORC, SOLDIER, VAMPIRE, ARCHER, AXEMAN, KNIGHT, LANCER];
-    const testPositions = [
-      { x: 0, y: 0 },
-      { x: 0, y: 1 },
-      { x: 0, y: 2 },
-      { x: 0, y: 3 },
-      { x: 0, y: 4 },
-      { x: 0, y: 5 },
-      { x: 0, y: 6 },
-      { x: 0, y: 7 },
-      { x: 0, y: 8 },
-    ];
-    for (let i = 0; i < playerUnitTypes.length; i++) {
-      const unitStats = playerUnitTypes[i];
-      const pos = testPositions[i];
-      const unitSize = unitStats.size || 1;
-      // Mark all tiles occupied by this unit
-      for (let s = 0; s < unitSize; s++) {
-        occupiedTiles.add(`${pos.x + s},${pos.y}`);
-      }
-      const animPrefix = unitStats.type;
-      const spriteScale = getSpriteConfig(unitStats.type).scale;
-      const originY = getSpriteConfig(unitStats.type).originY;
-
-      // Center sprite across all tiles the unit occupies
-      const spriteX = this.gridOffsetX + (pos.x + unitSize / 2) * scaledTileSize;
-      const spriteY = this.gridOffsetY + pos.y * scaledTileSize + scaledTileSize / 2;
-
-      const sprite = this.add.sprite(spriteX, spriteY, `${animPrefix}_idle`);
-      sprite.setOrigin(0.5, originY);
-      sprite.setScale(spriteScale);
-      sprite.setDepth(10 + pos.y); // Lower rows render on top
-      sprite.play(`${animPrefix}_idle_anim`);
-
-      const unit: Unit = {
-        id: `player${i + 1}`,
-        sprite,
-        stats: unitStats,
-        currentHp: unitStats.hp,
-        gridX: pos.x,
-        gridY: pos.y,
-        isPlayer: true,
-        state: 'moving',
-        setCounter: 0,
-        target: null,
-        chargeReady: true, // Lancers start with charge ready
-      };
-      this.units.push(unit);
-      this.updateHealthTint(unit);
-    }
-
-    // TEST: All units battle - enemy side
-    const enemyUnitTypes = [SKELETON_WARRIOR, SKELETON_GUARD, ORC, SOLDIER, VAMPIRE, ARCHER, AXEMAN, KNIGHT, LANCER];
-    const enemyTestPositions = [
-      { x: 15, y: 0 },
-      { x: 15, y: 1 },
-      { x: 15, y: 2 },
-      { x: 15, y: 3 },
-      { x: 15, y: 4 },
-      { x: 15, y: 5 },
-      { x: 15, y: 6 },
-      { x: 15, y: 7 },
-      { x: 14, y: 8 },  // Lancer is size 2, so x=14 occupies 14-15
-    ];
-    for (let i = 0; i < enemyUnitTypes.length; i++) {
-      const unitStats = enemyUnitTypes[i];
-      const pos = enemyTestPositions[i];
-      const unitSize = unitStats.size || 1;
-      // Mark all tiles occupied by this unit
-      for (let s = 0; s < unitSize; s++) {
-        occupiedTiles.add(`${pos.x + s},${pos.y}`);
-      }
-      const animPrefix = unitStats.type;
-      const spriteScale = getSpriteConfig(unitStats.type).scale;
-      const originY = getSpriteConfig(unitStats.type).originY;
-
-      // Center sprite across all tiles the unit occupies
-      const spriteX = this.gridOffsetX + (pos.x + unitSize / 2) * scaledTileSize;
-      const spriteY = this.gridOffsetY + pos.y * scaledTileSize + scaledTileSize / 2;
-
-      const sprite = this.add.sprite(spriteX, spriteY, `${animPrefix}_idle`);
-      sprite.setOrigin(0.5, originY);
-      sprite.setScale(spriteScale);
-      sprite.setDepth(10 + pos.y); // Lower rows render on top
-      sprite.setFlipX(true);
-      sprite.play(`${animPrefix}_idle_anim`);
-
-      const unit: Unit = {
-        id: `enemy${i + 1}`,
-        sprite,
-        stats: unitStats,
-        currentHp: unitStats.hp,
-        gridX: pos.x,
-        gridY: pos.y,
-        isPlayer: false,
-        state: 'moving',
-        setCounter: 0,
-        target: null,
-        chargeReady: true, // Lancers start with charge ready
-      };
-      this.units.push(unit);
-      this.updateHealthTint(unit);
-    }
+    // Must have line of sight (terrain may block)
+    return hasLineOfSight(viewer.gridX, viewer.gridY, target.gridX, target.gridY, this.terrainData);
   }
 
   private updateHealthTint(unit: Unit): void {
@@ -432,6 +1062,18 @@ export class CombatScene extends Phaser.Scene {
     if (!this.combatStarted) return;
 
     this.turnNumber++;
+
+    // Check for deployment phase triggers (turn 5 = phase 2, turn 10 = phase 3)
+    const nextPhaseIndex = this.deploymentPhase + 1;
+    if (nextPhaseIndex < DEPLOYMENT_PHASES.length) {
+      const nextPhase = DEPLOYMENT_PHASES[nextPhaseIndex];
+      if (this.turnNumber === nextPhase.turn) {
+        // Pause combat and start next deployment phase
+        this.combatStarted = false;
+        this.startDeploymentPhase(nextPhaseIndex);
+        return;
+      }
+    }
 
     const aliveUnits = this.units.filter(u => u.currentHp > 0);
     const playerUnits = aliveUnits.filter(u => u.isPlayer);
@@ -614,7 +1256,8 @@ export class CombatScene extends Phaser.Scene {
         dx = 0;
       }
       const dy = Math.abs(fromY - target.gridY);
-      return Math.max(dx, dy);
+      // Manhattan distance (units can only move in 4 cardinal directions)
+      return dx + dy;
     };
 
     const currentDist = calcDist(unit.gridX, unit.gridY);
@@ -634,17 +1277,17 @@ export class CombatScene extends Phaser.Scene {
         const newX = unit.gridX + dir.dx * steps;
         const newY = unit.gridY + dir.dy * steps;
 
-        // Check if unit can fit at new position (bounds + collision with size)
-        if (!canUnitFitAt(unit, newX, newY, this.gridWidth, this.gridHeight, this.units)) {
+        // Check if unit can fit at new position (bounds + collision with size + terrain)
+        if (!canUnitFitAtWithTerrain(unit, newX, newY, this.gridWidth, this.gridHeight, this.units, this.terrainData)) {
           break; // Can't go further in this direction
         }
 
-        // Also check that we don't pass through any units along the path
+        // Also check that we don't pass through any units/terrain along the path
         let pathClear = true;
         for (let i = 1; i < steps; i++) {
           const checkX = unit.gridX + dir.dx * i;
           const checkY = unit.gridY + dir.dy * i;
-          if (!canUnitFitAt(unit, checkX, checkY, this.gridWidth, this.gridHeight, this.units)) {
+          if (!canUnitFitAtWithTerrain(unit, checkX, checkY, this.gridWidth, this.gridHeight, this.units, this.terrainData)) {
             pathClear = false;
             break;
           }
@@ -722,8 +1365,8 @@ export class CombatScene extends Phaser.Scene {
         const newX = unit.gridX + dir.dx;
         const newY = unit.gridY + dir.dy;
 
-        // Check if unit can fit at destination
-        if (!canUnitFitAt(unit, newX, newY, this.gridWidth, this.gridHeight, this.units)) {
+        // Check if unit can fit at destination (including terrain)
+        if (!canUnitFitAtWithTerrain(unit, newX, newY, this.gridWidth, this.gridHeight, this.units, this.terrainData)) {
           continue;
         }
 
@@ -736,7 +1379,7 @@ export class CombatScene extends Phaser.Scene {
           for (let i = 1; i < totalSteps; i++) {
             const checkX = unit.gridX + stepDx * i;
             const checkY = unit.gridY + stepDy * i;
-            if (!canUnitFitAt(unit, checkX, checkY, this.gridWidth, this.gridHeight, this.units)) {
+            if (!canUnitFitAtWithTerrain(unit, checkX, checkY, this.gridWidth, this.gridHeight, this.units, this.terrainData)) {
               pathClear = false;
               break;
             }
@@ -916,8 +1559,36 @@ export class CombatScene extends Phaser.Scene {
       attacker.chargeReady = false; // Consume the charge
     }
 
-    // Calculate damage using the stats system
-    const { damage, isCrit } = calculateDamage(attackerStats, defender.stats);
+    // Orc Rage: +50% attack when below 50% HP
+    const isOrcRage = attacker.stats.type === 'orc' && attacker.currentHp < attacker.stats.hp * 0.5;
+    if (isOrcRage) {
+      attackerStats = { ...attackerStats, attack: Math.round(attackerStats.attack * 1.5) };
+    }
+
+    // Check if this is a ranged or melee attack
+    const isRanged = attacker.stats.attackRange > 1;
+
+    // Apply terrain melee attack penalty (water/mud reduces melee attack by 30%)
+    if (!isRanged) {
+      const meleeAttackPenalty = getTerrainTileMeleeAttackPenalty(
+        attacker.gridX, attacker.gridY, this.terrainData
+      );
+      if (meleeAttackPenalty > 0) {
+        attackerStats = {
+          ...attackerStats,
+          attack: Math.round(attackerStats.attack * (1 - meleeAttackPenalty))
+        };
+      }
+    }
+
+    // Calculate base damage using the stats system
+    let { damage, isCrit } = calculateDamage(attackerStats, defender.stats);
+
+    // Check for ranged attacks blocked by terrain
+    if (isRanged && !hasProjectilePath(attacker.gridX, attacker.gridY, defender.gridX, defender.gridY, this.terrainData)) {
+      // Projectile blocked by terrain - no damage
+      damage = 0;
+    }
 
     defender.currentHp = Math.max(0, defender.currentHp - damage);
 
@@ -996,8 +1667,7 @@ export class CombatScene extends Phaser.Scene {
       }
     });
 
-    // For ranged attacks, spawn a projectile
-    const isRanged = attacker.stats.attackRange > 1;
+    // For ranged attacks, spawn a projectile (isRanged already declared above)
     const defenderPrefix = getAnimPrefix(defender.stats.type);
 
     if (isRanged && attacker.stats.type === 'archer') {

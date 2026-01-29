@@ -7,7 +7,7 @@ Add new route modules here as they are created.
 
 from fastapi import APIRouter
 
-from app.api.routes import combat, heroes, game
+from app.api.routes import combat, heroes, game, npc
 
 api_router = APIRouter(prefix="/api")
 
@@ -15,3 +15,4 @@ api_router = APIRouter(prefix="/api")
 api_router.include_router(combat.router)
 api_router.include_router(heroes.router)
 api_router.include_router(game.router)
+api_router.include_router(npc.router)

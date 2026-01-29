@@ -3,11 +3,16 @@
  * ----------------------
  * Official overworld screen with HOMM3-style layout.
  * Main map view (owmap) on the left, toolbar on the right.
+ * Handles interaction modals triggered by stepping on special tiles.
  */
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import Phaser from 'phaser';
 import { OverworldScene } from './game/scenes/OverworldScene';
+import { InteractionTrigger } from './types/interaction';
+import { InteractionModal } from './components/ui/InteractionModal';
+import { ArmyDisplay } from './components/ui/ArmyDisplay';
+import { InteractionStoreProvider, useInteractionStore } from './stores';
 
 // Layout configuration
 const TOOLBAR_WIDTH = 200;
@@ -15,15 +20,26 @@ const SCREEN_MARGIN = 18; // Comfortable margin around the game
 const BORDER_COLOR = '#333';
 const BG_COLOR = '#0d0d1a';
 
-const OverworldApp: React.FC = () => {
+/** Inner component that uses the interaction store */
+const OverworldContent: React.FC = () => {
   const gameRef = useRef<Phaser.Game | null>(null);
+  const sceneRef = useRef<OverworldScene | null>(null);
+  const [activeInteraction, setActiveInteraction] = useState<InteractionTrigger | null>(null);
+  const [gameSize, setGameSize] = useState({ width: 0, height: 0 });
+  const { gold, recruitedUnits, combatModifiers } = useInteractionStore();
+
+  // Calculate game dimensions
+  const calculateGameSize = useCallback(() => {
+    const width = window.innerWidth - TOOLBAR_WIDTH - (SCREEN_MARGIN * 3);
+    const height = window.innerHeight - (SCREEN_MARGIN * 2);
+    return { width, height };
+  }, []);
 
   useEffect(() => {
     if (gameRef.current) return;
 
-    // Calculate game dimensions with margins
-    const gameWidth = window.innerWidth - TOOLBAR_WIDTH - (SCREEN_MARGIN * 3); // left, middle, right margins
-    const gameHeight = window.innerHeight - (SCREEN_MARGIN * 2); // top and bottom margins
+    const { width: gameWidth, height: gameHeight } = calculateGameSize();
+    setGameSize({ width: gameWidth, height: gameHeight });
 
     const config: Phaser.Types.Core.GameConfig = {
       type: Phaser.AUTO,
@@ -40,12 +56,26 @@ const OverworldApp: React.FC = () => {
 
     gameRef.current = new Phaser.Game(config);
 
+    // Get scene reference when it's ready
+    gameRef.current.events.once('ready', () => {
+      const scene = gameRef.current?.scene.getScene('OverworldScene') as OverworldScene;
+      if (scene) {
+        sceneRef.current = scene;
+
+        // Listen for interaction events from Phaser
+        scene.events.on('interaction-triggered', (trigger: InteractionTrigger) => {
+          console.log('React received interaction:', trigger);
+          setActiveInteraction(trigger);
+        });
+      }
+    });
+
     // Handle window resize
     const handleResize = () => {
       if (gameRef.current) {
-        const newWidth = window.innerWidth - TOOLBAR_WIDTH - (SCREEN_MARGIN * 3);
-        const newHeight = window.innerHeight - (SCREEN_MARGIN * 2);
+        const { width: newWidth, height: newHeight } = calculateGameSize();
         gameRef.current.scale.resize(newWidth, newHeight);
+        setGameSize({ width: newWidth, height: newHeight });
       }
     };
 
@@ -55,8 +85,26 @@ const OverworldApp: React.FC = () => {
       window.removeEventListener('resize', handleResize);
       gameRef.current?.destroy(true);
       gameRef.current = null;
+      sceneRef.current = null;
     };
+  }, [calculateGameSize]);
+
+  // Handle closing the interaction modal
+  const handleCloseInteraction = useCallback(() => {
+    setActiveInteraction(null);
+    // Unlock input in the scene and resume audio
+    if (sceneRef.current) {
+      sceneRef.current.setInputLocked(false);
+      sceneRef.current.resumeAudio();
+    }
   }, []);
+
+  // Resume audio when modal opens (in case AudioContext was suspended)
+  useEffect(() => {
+    if (activeInteraction && sceneRef.current) {
+      sceneRef.current.resumeAudio();
+    }
+  }, [activeInteraction]);
 
   return (
     <div
@@ -82,6 +130,7 @@ const OverworldApp: React.FC = () => {
           borderRadius: 4,
           overflow: 'hidden',
           backgroundColor: '#1a1a2e',
+          position: 'relative',
         }}
       >
         {/* Game canvas container */}
@@ -92,6 +141,16 @@ const OverworldApp: React.FC = () => {
             overflow: 'hidden',
           }}
         />
+
+        {/* Interaction Modal */}
+        {activeInteraction && (
+          <InteractionModal
+            interaction={activeInteraction}
+            onClose={handleCloseInteraction}
+            gameWidth={gameSize.width}
+            gameHeight={gameSize.height}
+          />
+        )}
       </div>
 
       {/* Toolbar (right side) */}
@@ -136,47 +195,9 @@ const OverworldApp: React.FC = () => {
           />
         </div>
 
-        {/* Tooltip / Info Section */}
+        {/* Resources Section */}
         <div
-          id="toolbar-tooltip"
-          style={{
-            backgroundColor: '#1a1a2e',
-            border: `2px solid ${BORDER_COLOR}`,
-            borderRadius: 4,
-            padding: 8,
-            minHeight: 80,
-          }}
-        >
-          <div
-            style={{
-              color: '#666',
-              fontSize: '10px',
-              marginBottom: 4,
-              textTransform: 'uppercase',
-              letterSpacing: '1px',
-            }}
-          >
-            Info
-          </div>
-          <div
-            id="tooltip-content"
-            style={{
-              color: '#aaa',
-              fontSize: '12px',
-            }}
-          >
-            <div style={{ color: '#e94560', fontWeight: 'bold', marginBottom: 4 }}>
-              Your Town
-            </div>
-            <div style={{ color: '#888', fontSize: '11px' }}>
-              Click minimap to navigate
-            </div>
-          </div>
-        </div>
-
-        {/* Controls Section */}
-        <div
-          id="toolbar-controls"
+          id="toolbar-resources"
           style={{
             backgroundColor: '#1a1a2e',
             border: `2px solid ${BORDER_COLOR}`,
@@ -193,39 +214,31 @@ const OverworldApp: React.FC = () => {
               letterSpacing: '1px',
             }}
           >
-            Controls
+            Resources
           </div>
-          <div style={{ color: '#888', fontSize: '11px', lineHeight: 1.6 }}>
-            <div><span style={{ color: '#aaa' }}>Click</span> - Show path</div>
-            <div><span style={{ color: '#aaa' }}>Click again</span> - Move</div>
-            <div><span style={{ color: '#aaa' }}>Esc</span> - Cancel path</div>
-            <div><span style={{ color: '#aaa' }}>D</span> - Debug mode</div>
+          <div style={{ color: '#ffd700', fontSize: '14px', fontWeight: 'bold' }}>
+            Gold: {gold}
           </div>
+          {combatModifiers.length > 0 && (
+            <div style={{ color: '#9370db', fontSize: '11px', marginTop: 4 }}>
+              Blessings: {combatModifiers.length}
+            </div>
+          )}
         </div>
 
-        {/* Spacer */}
-        <div style={{ flex: 1 }} />
-
-        {/* Footer */}
-        <div
-          id="toolbar-footer"
-          style={{
-            backgroundColor: '#1a1a2e',
-            border: `2px solid ${BORDER_COLOR}`,
-            borderRadius: 4,
-            padding: 8,
-            textAlign: 'center',
-          }}
-        >
-          <div style={{ color: '#555', fontSize: '10px' }}>
-            RogueHeroes
-          </div>
-          <div style={{ color: '#444', fontSize: '9px' }}>
-            Overworld
-          </div>
-        </div>
+        {/* Army Display Section */}
+        <ArmyDisplay />
       </div>
     </div>
+  );
+};
+
+/** Main app wrapped with providers */
+const OverworldApp: React.FC = () => {
+  return (
+    <InteractionStoreProvider>
+      <OverworldContent />
+    </InteractionStoreProvider>
   );
 };
 

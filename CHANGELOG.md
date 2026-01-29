@@ -2,6 +2,83 @@
 
 All notable changes to RogueHeroes will be documented in this file.
 
+## [Alpha 1.2] - 2026-01-28 (16 hours total)
+
+### Combat Test Mode
+- Added test mode for quickly testing all units in combat
+- Spawns one of each unit type (9 units) on both sides
+- Triggered via `?test=true` URL parameter (e.g., `http://localhost:3002/?test=true`)
+- Can also be triggered via scene init data: `{ testMode: true }`
+- Combat starts automatically after 500ms delay
+- Shows "TEST BATTLE - All Units" title in yellow to indicate test mode
+- Useful for balance testing and debugging unit interactions
+
+### Battlefield Editor Debugging
+- Added console logging for grid resize operations
+- Logs when resize events are emitted from React UI
+- Logs when resize events are received by Phaser scene
+- Logs before/after dimensions and terrain array state
+- Helps diagnose issues with grid expansion/contraction
+
+### Multi-Map Architecture
+
+Refactored the game structure to support multiple maps with data-driven configuration, replacing hardcoded values with a flexible registry system.
+
+#### New Type System (`types/mapConfig.ts`)
+- `MapConfig` - Complete map configuration (id, name, biome, spawn, locations, connections, audio)
+- `SpawnConfig` - Hero start position, player town, entry points from other maps
+- `MapLocation` - Named locations with type, bounds, entrance tiles, and type-specific config
+- `TownConfig` - Features, tavern NPCs, recruitable units, blessings, isPlayerHome flag
+- `ShrineConfig`, `DungeonConfig` - Configuration for other location types
+- `MapConnection` - Links between maps with trigger tiles and requirements
+
+#### Map Registry (`game/data/maps/`)
+- `MAP_REGISTRY` - Central registry of all maps keyed by ID
+- `getMapConfig(mapId)` - Lookup function for map configurations
+- `getStartingMap()` - Returns the default starting map (tutorial00)
+- `getLocationAtTile(mapId, x, y)` - Find location at tile position
+- `getSpawnPosition(mapId, entryFrom?)` - Get spawn point for map entry
+
+#### NPC Registry (`game/data/npcs/`)
+- `NPC_REGISTRY` - All NPCs keyed by unique ID
+- `getNpc(id)`, `getNpcs(ids[])` - Lookup functions
+- Decouples NPC definitions from specific map locations
+
+#### Tutorial Map Configuration (`maps/tutorial00.config.ts`)
+- Captures all previously hardcoded values from OverworldScene
+- Hero start: (2, 4), Player town: (2, 3)
+- Player castle with tavern NPCs: `['marta_tavern_keeper', 'seraphina_fighter']`
+- Black Tower with undead recruitment units
+- Audio configuration for music and ambience
+
+#### OverworldScene Refactoring
+- Removed hardcoded `PLAYER_TOWN` and `HERO_START` constants
+- Added `currentMapConfig: MapConfig` property
+- Added `init(data?: { mapId, entryFrom })` for map selection
+- Map loading from config (`config.mapFile`)
+- Hero spawn from config (`config.spawn.heroStart`)
+- Minimap markers generated from `config.locations`
+- Interaction triggers include `mapId` and `locationId`
+
+#### Interaction System Updates
+- `InteractionTrigger` now includes `mapId` and `locationId`
+- `getInteractionDataFromConfig()` - Uses map config for data lookup
+- `getTavernNpcsByLocationId()` - Loads NPCs from registry based on location
+- TownInteraction dynamically loads NPCs from map configuration
+- Tavern tab only shows if location has configured NPCs
+
+#### Code Organization
+- Created `game/data/defaults.ts` for shared constants (avoids circular imports)
+- Re-exported defaults from InteractionData for backwards compatibility
+
+### Future: Adding New Maps
+1. Create map JSON in `public/assets/maps/`
+2. Create config in `game/data/maps/{name}.config.ts`
+3. Register in `maps/index.ts`
+4. Add map connections to link maps together
+
+---
+
 ## [Alpha 1.1] - 2026-01-26 (8 hours total)
 
 ### New Units

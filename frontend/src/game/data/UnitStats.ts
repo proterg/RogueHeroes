@@ -60,28 +60,28 @@ export interface UnitStats {
 /**
  * Skeleton Warrior (Type 1)
  * -------------------------
- * Basic melee skeleton with balanced stats.
- * Good all-rounder, slightly favors offense.
+ * Expendable fodder unit - cheap and weak.
+ * Low stats across the board, meant to be thrown in numbers.
  */
 export const SKELETON_WARRIOR: UnitStats = {
   name: 'Skeleton Warrior',
   type: 'skeleton1',
-  description: 'A reanimated warrior wielding a rusty sword. Balanced fighter with decent offense.',
+  description: 'Fragile reanimated bones. Cheap fodder that dies quickly.',
 
   // Core Stats
-  hp: 45,
-  attack: 12,
-  defense: 3,
+  hp: 35,
+  attack: 8,
+  defense: 2,
 
   // Speed Stats
   moveSpeed: 1,
   attackSpeed: 1,
-  initiative: 'first',    // Attacks first
+  initiative: 'regular',  // No special advantage
 
   // Combat Stats
   attackRange: 1,       // Melee
-  critChance: 10,       // 10% crit chance
-  critDamage: 1.5,      // 150% damage on crit
+  critChance: 5,        // 5% crit chance (basic attacks)
+  critDamage: 1.25,     // 125% damage on crit (low impact)
   vision: 4,            // Can see 4 tiles radius
   attackDelay: 1,       // 1 turn to ready attack
 
@@ -93,13 +93,13 @@ export const SKELETON_WARRIOR: UnitStats = {
 /**
  * Skeleton Guard (Type 2)
  * -----------------------
- * Defensive skeleton with shield. Tanky but slower.
- * High HP and defense, lower attack.
+ * Shield tank - high defense, low damage.
+ * Protects the backline and absorbs hits.
  */
 export const SKELETON_GUARD: UnitStats = {
   name: 'Skeleton Guard',
   type: 'skeleton2',
-  description: 'A skeletal defender with remnants of armor. Tough but slow.',
+  description: 'A skeletal defender with remnants of armor. Absorbs damage for the team.',
 
   // Core Stats
   hp: 60,
@@ -116,7 +116,7 @@ export const SKELETON_GUARD: UnitStats = {
   critChance: 5,        // 5% crit chance
   critDamage: 1.25,     // 125% damage on crit
   vision: 3,            // Can see 3 tiles radius
-  attackDelay: 2,       // 2 turns to ready attack (slower)
+  attackDelay: 1,       // 1 turn to ready attack (reduced from 2)
 
   size: 1,              // Normal size
   lifesteal: 0,
@@ -126,18 +126,18 @@ export const SKELETON_GUARD: UnitStats = {
 /**
  * Orc
  * ---
- * Heavy melee fighter with high HP and attack.
- * Slow but devastating when it connects.
+ * Berserker - glass cannon that gets stronger when wounded.
+ * Low defense but gains +50% attack when below 50% HP (Rage mechanic).
  */
 export const ORC: UnitStats = {
   name: 'Orc',
   type: 'orc',
-  description: 'A brutal green-skinned warrior. Slow but hits like a truck.',
+  description: 'A raging berserker. Deals +50% damage when below half health.',
 
   // Core Stats
-  hp: 80,
+  hp: 70,
   attack: 18,
-  defense: 4,
+  defense: 2,             // Glass cannon - low defense
 
   // Speed Stats
   moveSpeed: 1,
@@ -146,14 +146,14 @@ export const ORC: UnitStats = {
 
   // Combat Stats
   attackRange: 1,         // Melee
-  critChance: 15,         // 15% crit chance
+  critChance: 20,         // 20% crit chance (more crit-focused)
   critDamage: 2.0,        // 200% damage on crit
   vision: 3,              // Can see 3 tiles radius
   attackDelay: 2,         // 2 turns to ready attack
 
   size: 1,                // Normal size
   lifesteal: 0,
-  abilities: [],
+  abilities: ['rage'],    // +50% ATK below 50% HP (implemented in CombatScene)
 };
 
 /**
@@ -225,30 +225,30 @@ export const VAMPIRE: UnitStats = {
 /**
  * Archer
  * ------
- * Ranged human unit with bow. High damage at range but fragile.
- * First strike advantage, good vision.
+ * Ranged DPS - attacks last to give melee time to close distance.
+ * Slightly more HP to compensate for late initiative.
  */
 export const ARCHER: UnitStats = {
   name: 'Archer',
   type: 'archer',
-  description: 'A skilled bowman. Deadly at range but vulnerable up close.',
+  description: 'A skilled bowman. Attacks last, giving melee a chance to engage.',
 
   // Core Stats
-  hp: 30,
-  attack: 12,
+  hp: 35,
+  attack: 6,
   defense: 2,
 
   // Speed Stats
   moveSpeed: 1,
   attackSpeed: 1,
-  initiative: 'first',    // Quick draw
+  initiative: 'last',     // Attacks last (gives melee chance to close)
 
   // Combat Stats
   attackRange: 5,         // Ranged - can shoot 5 tiles
   critChance: 18,         // 18% crit chance (aimed shots)
   critDamage: 1.75,       // 175% damage on crit
   vision: 6,              // Excellent vision
-  attackDelay: 1,         // Quick to aim
+  attackDelay: 2,         // Takes time to aim (increased from 1)
 
   size: 1,                // Normal size
   lifesteal: 0,
@@ -258,18 +258,18 @@ export const ARCHER: UnitStats = {
 /**
  * Armored Axeman
  * --------------
- * Heavy melee unit with axe. High HP and damage, good defense.
- * Slower but devastating when in range.
+ * Armored bruiser - tankiest melee with reliable damage.
+ * Highest HP and defense, consistent (not crit-focused).
  */
 export const AXEMAN: UnitStats = {
   name: 'Armored Axeman',
   type: 'axeman',
-  description: 'A heavily armored warrior wielding a battle axe. Slow but devastating.',
+  description: 'A heavily armored warrior. Slow but extremely durable.',
 
   // Core Stats
-  hp: 70,
-  attack: 18,
-  defense: 6,
+  hp: 80,
+  attack: 15,
+  defense: 7,               // Highest armor
 
   // Speed Stats
   moveSpeed: 1,
@@ -278,8 +278,8 @@ export const AXEMAN: UnitStats = {
 
   // Combat Stats
   attackRange: 1,           // Melee
-  critChance: 15,           // 15% crit chance
-  critDamage: 2.0,          // 200% damage on crit (devastating axe blow)
+  critChance: 10,           // 10% crit chance (reliable, not crit-focused)
+  critDamage: 1.5,          // 150% damage on crit (consistent damage)
   vision: 3,                // Limited vision in helmet
   attackDelay: 2,           // Slow to wind up
 
@@ -291,8 +291,8 @@ export const AXEMAN: UnitStats = {
 /**
  * Knight
  * ------
- * Balanced armored melee unit with sword and shield.
- * Good defense and reliable damage.
+ * Frontline fighter - balanced armor and damage.
+ * Slightly tankier than Soldier, reliable in combat.
  */
 export const KNIGHT: UnitStats = {
   name: 'Knight',
@@ -300,7 +300,7 @@ export const KNIGHT: UnitStats = {
   description: 'A noble warrior with sword and shield. Well-balanced and reliable.',
 
   // Core Stats
-  hp: 60,
+  hp: 65,
   attack: 14,
   defense: 5,
 

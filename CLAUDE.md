@@ -92,6 +92,19 @@ cd backend && pytest
 cd frontend && npm run test
 ```
 
+### Iterative Testing Protocol
+When testing changes iteratively during a session:
+1. **Always check if the dev server is running first** before making changes
+2. If not running, start it on the port used throughout the session:
+   - Overworld (with backend): `npm run dev:overworld:full` (ports 5175 + 8000)
+   - Overworld (frontend only): `npm run dev:overworld` (port 5175)
+   - Combat (with backend): `npm run dev:full` (ports 3002 + 8000)
+   - Combat (frontend only): `npm run dev` (port 3002)
+   - Editor: `npm run dev:editor` (port 5174)
+3. Keep the same server running throughout the session to avoid port conflicts
+4. After code changes, the page should hot-reload automatically
+5. The `:full` scripts start both frontend and backend together (needed for AI NPCs)
+
 ---
 
 ## Combat System Architecture
